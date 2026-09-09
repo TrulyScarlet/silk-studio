@@ -1,0 +1,24 @@
+[package]
+name = "encoder-media-foundation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+encoder-api = { workspace = true }
+gpu-windows = { workspace = true }
+media-types = { workspace = true }
+diagnostics = { workspace = true }
+thiserror = { workspace = true }
+windows = { version = "0.62", features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+
+[dev-dependencies]
+capture-api = { workspace = true }
+capture-windows = { workspace = true }

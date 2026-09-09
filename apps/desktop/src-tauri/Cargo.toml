@@ -1,0 +1,41 @@
+[package]
+name = "silk"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+audio-api = { workspace = true }
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
+tauri-plugin-dialog = { workspace = true }
+tauri-plugin-notification = { workspace = true }
+tauri-plugin-opener = { workspace = true }
+
+app-controller = { workspace = true }
+configuration = { workspace = true }
+chrono = { workspace = true }
+diagnostics = { workspace = true }
+capture-api = { workspace = true }
+capture-windows = { workspace = true }
+clip-library = { workspace = true }
+encoder-api = { workspace = true }
+encoder-media-foundation = { workspace = true }
+hotkeys = { workspace = true }
+media-types = { workspace = true }
+mp4 = { workspace = true }
+muxer = { workspace = true }
+native-hud = { workspace = true }
+recorder-engine = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+test-support = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+audio-wasapi = { workspace = true }
+windows-sys = { workspace = true }
+
+[features]
+default = []

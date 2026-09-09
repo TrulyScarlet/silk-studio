@@ -1,0 +1,9 @@
+[package]
+name = "capture-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+media-types = { workspace = true }
+encoder-api = { workspace = true }
+thiserror = { workspace = true }

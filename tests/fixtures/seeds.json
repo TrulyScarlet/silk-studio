@@ -1,0 +1,6 @@
+{
+  "_comment": "Reserved for Segment S1 randomized property-test seeds (spec §27.3).",
+  "synthetic_video_default_seed": 12345,
+  "synthetic_audio_default_seed": 67890,
+  "jitter_default_seed": 24680
+}

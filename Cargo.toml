@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/*",
+    "tests/integration",
+    "tests/endurance",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+mp4 = { package = "silk-mp4", path = "crates/mp4-silk" }
+bytes = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10.9"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+tauri-plugin-notification = "2.3.3"
+tauri-plugin-dialog = "2.7.2"
+tauri-plugin-opener = "2.5.4"
+
+media-types = { path = "crates/media-types" }
+media-clock = { path = "crates/media-clock" }
+replay-buffer = { path = "crates/replay-buffer" }
+capture-api = { path = "crates/capture-api" }
+capture-windows = { path = "crates/capture-windows" }
+audio-api = { path = "crates/audio-api" }
+audio-wasapi = { path = "crates/audio-wasapi" }
+audio-sync = { path = "crates/audio-sync" }
+encoder-api = { path = "crates/encoder-api" }
+gpu-windows = { path = "crates/gpu-windows" }
+encoder-ffmpeg = { path = "crates/encoder-ffmpeg" }
+encoder-media-foundation = { path = "crates/encoder-media-foundation" }
+muxer = { path = "crates/muxer" }
+hotkeys = { path = "crates/hotkeys" }
+clip-library = { path = "crates/clip-library" }
+clip-export = { path = "crates/clip-export" }
+configuration = { path = "crates/configuration" }
+diagnostics = { path = "crates/diagnostics" }
+recorder-engine = { path = "crates/recorder-engine" }
+app-controller = { path = "crates/app-controller" }
+native-hud = { path = "crates/native-hud" }
+test-support = { path = "crates/test-support" }
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+debug = 1

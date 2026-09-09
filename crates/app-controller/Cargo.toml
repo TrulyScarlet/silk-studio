@@ -1,0 +1,27 @@
+[package]
+name = "app-controller"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+media-types = { workspace = true }
+capture-api = { workspace = true }
+encoder-api = { workspace = true }
+muxer = { workspace = true }
+recorder-engine = { workspace = true }
+configuration = { workspace = true }
+diagnostics = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+test-support = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "instance-probe"
+path = "src/bin/instance_probe.rs"

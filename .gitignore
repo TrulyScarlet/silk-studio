@@ -1,0 +1,12 @@
+/target
+Cargo.lock.bak
+node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+portfolio-op1/
+*.log
+*.tmp
+*.bmp
+.DS_Store
+Thumbs.db
+.slim/deepwork/

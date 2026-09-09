@@ -1,0 +1,14 @@
+[package]
+name = "test-support"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+media-types = { workspace = true }
+capture-api = { workspace = true }
+audio-api = { workspace = true }
+encoder-api = { workspace = true }
+muxer = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

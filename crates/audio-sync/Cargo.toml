@@ -1,0 +1,9 @@
+[package]
+name = "audio-sync"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+media-types = { workspace = true }
+media-clock = { workspace = true }
+thiserror = { workspace = true }

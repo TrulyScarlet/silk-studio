@@ -1,0 +1,18 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[dev-dependencies]
+app-controller = { workspace = true }
+recorder-engine = { workspace = true }
+audio-api = { workspace = true }
+configuration = { workspace = true }
+media-types = { workspace = true }
+capture-api = { workspace = true }
+encoder-api = { workspace = true }
+encoder-media-foundation = { workspace = true }
+muxer = { workspace = true }
+test-support = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "s8-endurance"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+app-controller = { workspace = true }
+audio-api = { workspace = true }
+capture-api = { workspace = true }
+clip-library = { workspace = true }
+encoder-api = { workspace = true }
+media-types = { workspace = true }
+muxer = { workspace = true }
+recorder-engine = { workspace = true }
+test-support = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "recorder-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+media-types = { workspace = true }
+capture-api = { workspace = true }
+audio-api = { workspace = true }
+audio-sync = { workspace = true }
+encoder-api = { workspace = true }
+muxer = { workspace = true }
+replay-buffer = { workspace = true }
+diagnostics = { workspace = true }
+thiserror = { workspace = true }
