@@ -117,35 +117,108 @@ pub fn generate_theme_icon_rgba(theme: Theme) -> (Vec<u8>, u32, u32) {
         }
     }
 
-    // 6. Theme Fill Colors
-    let (fill_r, fill_g, fill_b) = match theme {
-        Theme::Studio => (168, 85, 247),   // Electric Violet (#a855f7)
-        Theme::Classic => (255, 255, 179), // Butter Yellow (#ffffb3)
-        Theme::Ember => (255, 154, 60),    // Warm Spiced Autumn Orange (#ff9a3c)
-        Theme::Vamp => (252, 113, 113),    // Crimson Coral (#fc7171)
+    // 6. Theme Palette
+    let (fill_rgb, outline_rgb, border_rgb, bg_top, bg_bottom) = match theme {
+        Theme::Studio => (
+            (192, 132, 252), // #c084fc bright purple arrows
+            (20, 12, 32),    // dark outline
+            (168, 85, 247),  // #a855f7 border
+            (38, 18, 58),    // bg top-left
+            (18, 12, 28),    // bg bottom-right
+        ),
+        Theme::Classic => (
+            (255, 255, 179), // #ffffb3 butter yellow
+            (18, 19, 14),
+            (212, 212, 122),
+            (32, 34, 22),
+            (16, 17, 12),
+        ),
+        Theme::Ember => (
+            (255, 154, 60), // #ff9a3c amber
+            (26, 14, 8),
+            (249, 115, 22),
+            (46, 26, 14),
+            (24, 14, 8),
+        ),
+        Theme::Vamp => (
+            (252, 113, 113), // #fc7171 crimson
+            (22, 10, 14),
+            (236, 72, 153),
+            (42, 16, 22),
+            (20, 10, 14),
+        ),
     };
 
-    // Render 2x scaled (64x64) raw RGBA buffer
-    let scale = 2_usize;
-    let size = N * scale;
+    let size = 64_usize;
     let mut rgba = vec![0_u8; size * size * 4];
 
+    let center = (size as f64 - 1.0) / 2.0;
+    let half = size as f64 * 0.44;
+    let radius = size as f64 * 0.18;
+    let border_thickness = 1.6_f64;
+
+    let glyph_scale = (size as f64 * 0.52) / (N as f64);
+    let glyph_origin = (size as f64 - (N as f64) * glyph_scale) / 2.0;
+
     for y in 0..size {
-        let gy = y / scale;
         for x in 0..size {
-            let gx = x / scale;
             let offset = (y * size + x) * 4;
 
-            if fill[gy][gx] {
-                rgba[offset] = fill_r;
-                rgba[offset + 1] = fill_g;
-                rgba[offset + 2] = fill_b;
-                rgba[offset + 3] = 255;
-            } else if outline[gy][gx] {
-                rgba[offset] = 0;
-                rgba[offset + 1] = 0;
-                rgba[offset + 2] = 0;
-                rgba[offset + 3] = 255;
+            let dx = (x as f64 - center).abs() - (half - radius);
+            let dy = (y as f64 - center).abs() - (half - radius);
+            let dist = if dx > 0.0 && dy > 0.0 {
+                (dx * dx + dy * dy).sqrt() - radius
+            } else {
+                dx.max(dy) - radius
+            };
+
+            if dist > 0.5 {
+                continue;
+            }
+
+            let outer_alpha = (0.5 - dist).clamp(0.0, 1.0);
+
+            let gx = ((x as f64 - glyph_origin) / glyph_scale).floor() as isize;
+            let gy = ((y as f64 - glyph_origin) / glyph_scale).floor() as isize;
+            let mut is_fill = false;
+            let mut is_outline = false;
+            if gx >= 0 && gx < N as isize && gy >= 0 && gy < N as isize {
+                let ux = gx as usize;
+                let uy = gy as usize;
+                if fill[uy][ux] {
+                    is_fill = true;
+                } else if outline[uy][ux] {
+                    is_outline = true;
+                }
+            }
+
+            if is_fill {
+                rgba[offset] = fill_rgb.0;
+                rgba[offset + 1] = fill_rgb.1;
+                rgba[offset + 2] = fill_rgb.2;
+                rgba[offset + 3] = (255.0 * outer_alpha).round() as u8;
+            } else if is_outline {
+                rgba[offset] = outline_rgb.0;
+                rgba[offset + 1] = outline_rgb.1;
+                rgba[offset + 2] = outline_rgb.2;
+                rgba[offset + 3] = (255.0 * outer_alpha).round() as u8;
+            } else if dist >= -border_thickness {
+                rgba[offset] = border_rgb.0;
+                rgba[offset + 1] = border_rgb.1;
+                rgba[offset + 2] = border_rgb.2;
+                rgba[offset + 3] = (255.0 * outer_alpha).round() as u8;
+            } else {
+                let grad_t = ((x + y) as f64 / ((size * 2) as f64)).clamp(0.0, 1.0);
+                let r = (bg_top.0 as f64 * (1.0 - grad_t) + bg_bottom.0 as f64 * grad_t).round()
+                    as u8;
+                let g = (bg_top.1 as f64 * (1.0 - grad_t) + bg_bottom.1 as f64 * grad_t).round()
+                    as u8;
+                let b = (bg_top.2 as f64 * (1.0 - grad_t) + bg_bottom.2 as f64 * grad_t).round()
+                    as u8;
+                rgba[offset] = r;
+                rgba[offset + 1] = g;
+                rgba[offset + 2] = b;
+                rgba[offset + 3] = (255.0 * outer_alpha).round() as u8;
             }
         }
     }
