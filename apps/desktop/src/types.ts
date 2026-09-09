@@ -97,7 +97,7 @@ export type PixelFormat =
   | "ayuv"
   | string;
 
-export type AppTheme = "classic" | "ember" | "vamp";
+export type AppTheme = "studio" | "classic" | "ember" | "vamp";
 
 export type EncoderSelection = "auto" | "hardware" | "software";
 

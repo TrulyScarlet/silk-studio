@@ -741,7 +741,7 @@ mod tests {
         assert!(app.minimize_to_tray);
         assert!(app.notifications_enabled);
         assert!(app.clip_sound_enabled);
-        assert_eq!(app.theme, crate::model::Theme::Classic);
+        assert_eq!(app.theme, crate::model::Theme::Studio);
         assert_eq!(base().application, app);
     }
 

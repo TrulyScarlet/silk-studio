@@ -133,7 +133,7 @@ const PREVIEW_MOCK_SETTINGS: AppSettings = {
     minimizeToTray: true,
     notificationsEnabled: true,
     clipSoundEnabled: true,
-    theme: "classic",
+    theme: "studio",
   },
   diagnostics: {
     loggingLevel: "info",
@@ -295,10 +295,10 @@ function normalizeVideoCodec(raw: string | undefined | null): VideoCodec {
 }
 
 function normalizeTheme(raw: string | undefined | null): AppTheme {
-  if (raw === "ember" || raw === "vamp") {
+  if (raw === "ember" || raw === "vamp" || raw === "classic") {
     return raw;
   }
-  return "classic";
+  return "studio";
 }
 
 function parseVideoFidelityMode(raw: string | undefined | null): VideoFidelityMode | null {
@@ -518,7 +518,7 @@ export default function App() {
   }
 
   const activeTheme: AppTheme =
-    draft?.application?.theme ?? settings?.application?.theme ?? "classic";
+    draft?.application?.theme ?? settings?.application?.theme ?? "studio";
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", activeTheme);
@@ -1010,7 +1010,7 @@ export default function App() {
               ...current,
               application: {
                 ...current.application,
-                theme: settings?.application.theme ?? "classic",
+                theme: settings?.application.theme ?? "studio",
               },
             }
           : current,

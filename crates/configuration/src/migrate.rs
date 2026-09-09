@@ -192,7 +192,7 @@ fn migrate_v4_to_v5(mut document: Value) -> Result<Value, ConfigError> {
 }
 
 /// Migrate v5 settings to v6:
-/// Inserts `clipSoundEnabled: true` and `theme: "classic"` under `application`
+/// Inserts `clipSoundEnabled: true` and `theme: "studio"` under `application`
 /// if not present, preserving all existing fields.
 fn migrate_v5_to_v6(mut document: Value) -> Result<Value, ConfigError> {
     let Some(settings) = document.get_mut("settings").and_then(Value::as_object_mut) else {
@@ -207,7 +207,7 @@ fn migrate_v5_to_v6(mut document: Value) -> Result<Value, ConfigError> {
             application.insert("clipSoundEnabled".to_string(), Value::from(true));
         }
         if !application.contains_key("theme") {
-            application.insert("theme".to_string(), Value::from("classic"));
+            application.insert("theme".to_string(), Value::from("studio"));
         }
     }
 
@@ -524,7 +524,7 @@ mod tests {
         );
         assert_eq!(settings.output.container, crate::ContainerFormat::Mp4);
         assert!(settings.application.clip_sound_enabled);
-        assert_eq!(settings.application.theme, crate::model::Theme::Classic);
+        assert_eq!(settings.application.theme, crate::model::Theme::Studio);
     }
 
     #[test]
@@ -597,6 +597,7 @@ mod tests {
     #[test]
     fn theme_serde_and_invalid_values() {
         let themes = [
+            (crate::model::Theme::Studio, "\"studio\""),
             (crate::model::Theme::Classic, "\"classic\""),
             (crate::model::Theme::Ember, "\"ember\""),
             (crate::model::Theme::Vamp, "\"vamp\""),

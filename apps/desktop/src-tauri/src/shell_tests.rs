@@ -684,7 +684,7 @@ fn shell_state_applies_and_persists_clip_sound_and_theme_settings() {
     assert!(initial_settings.application.clip_sound_enabled);
     assert_eq!(
         serde_json::to_value(initial_settings.application.theme).unwrap(),
-        "classic"
+        "studio"
     );
 
     let state = shell::ShellState::with_app_config(

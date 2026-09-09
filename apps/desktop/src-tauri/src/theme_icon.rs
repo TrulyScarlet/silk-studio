@@ -119,6 +119,7 @@ pub fn generate_theme_icon_rgba(theme: Theme) -> (Vec<u8>, u32, u32) {
 
     // 6. Theme Fill Colors
     let (fill_r, fill_g, fill_b) = match theme {
+        Theme::Studio => (168, 85, 247),   // Electric Violet (#a855f7)
         Theme::Classic => (255, 255, 179), // Butter Yellow (#ffffb3)
         Theme::Ember => (255, 154, 60),    // Warm Spiced Autumn Orange (#ff9a3c)
         Theme::Vamp => (252, 113, 113),    // Crimson Coral (#fc7171)

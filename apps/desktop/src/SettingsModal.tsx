@@ -2344,6 +2344,37 @@ export function SettingsModal({
                     <div className="theme-card-grid">
                       <button
                         type="button"
+                        className={`theme-card ${draft.application.theme === "studio" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
+                        onClick={() =>
+                          updateDraft((current) => ({
+                            ...current,
+                            application: {
+                              ...current.application,
+                              theme: "studio",
+                            },
+                          }))
+                        }
+                        disabled={settingsBusy}
+                        role="radio"
+                        aria-checked={draft.application.theme === "studio"}
+                      >
+                        <div className="theme-card-header">
+                          <div className="theme-title-group">
+                            <span className="theme-radio-dot" aria-hidden="true" />
+                            <strong className="theme-name">Silk Studio</strong>
+                          </div>
+                          <span className="theme-tag">Default</span>
+                        </div>
+                        <div className="theme-swatch-row" aria-hidden="true">
+                          <span className="theme-swatch swatch-studio-bg" />
+                          <span className="theme-swatch swatch-studio-surface" />
+                          <span className="theme-swatch swatch-studio-accent" />
+                        </div>
+                        <p className="theme-description">Deep obsidian violet with electric purple & neon accents.</p>
+                      </button>
+
+                      <button
+                        type="button"
                         className={`theme-card ${draft.application.theme === "classic" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
                         onClick={() =>
                           updateDraft((current) => ({
@@ -2361,7 +2392,7 @@ export function SettingsModal({
                         <div className="theme-card-header">
                           <div className="theme-title-group">
                             <span className="theme-radio-dot" aria-hidden="true" />
-                            <strong className="theme-name">Classic Silk</strong>
+                            <strong className="theme-name">Silk (Legacy)</strong>
                           </div>
                           <span className="theme-tag">Gold</span>
                         </div>
@@ -2370,7 +2401,7 @@ export function SettingsModal({
                           <span className="theme-swatch swatch-classic-surface" />
                           <span className="theme-swatch swatch-classic-accent" />
                         </div>
-                        <p className="theme-description">Deep obsidian-olive with butter gold typography.</p>
+                        <p className="theme-description">Original obsidian-olive with butter yellow typography.</p>
                       </button>
 
                       <button

@@ -156,14 +156,16 @@ fn configure_settings(
 #[tauri::command]
 fn update_theme_icon(app: AppHandle, theme: String) -> Result<(), String> {
     let t = match theme.as_str() {
+        "classic" => configuration::Theme::Classic,
         "ember" => configuration::Theme::Ember,
         "vamp" => configuration::Theme::Vamp,
-        _ => configuration::Theme::Classic,
+        _ => configuration::Theme::Studio,
     };
     theme_icon::apply_theme_icon(&app, t);
 
     if let Some(window) = app.get_webview_window("main") {
         let (r, g, b) = match t {
+            configuration::Theme::Studio => (9, 9, 12),
             configuration::Theme::Classic => (14, 15, 11),
             configuration::Theme::Ember => (28, 18, 12),
             configuration::Theme::Vamp => (14, 14, 17),
@@ -682,6 +684,7 @@ fn main() {
 
             if let Some(window) = app.get_webview_window("main") {
                 let (r, g, b) = match settings.application.theme {
+                    configuration::Theme::Studio => (9, 9, 12),
                     configuration::Theme::Classic => (14, 15, 11),
                     configuration::Theme::Ember => (28, 18, 12),
                     configuration::Theme::Vamp => (14, 14, 17),

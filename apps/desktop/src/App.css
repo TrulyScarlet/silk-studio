@@ -1,4 +1,68 @@
 :root,
+[data-theme="studio"] {
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  color: var(--text, #ececf1);
+  background: var(--bg, #09090c);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  color-scheme: dark;
+  --bg: #09090c;
+  --bg-deep: #050507;
+  --surface: #121216;
+  --surface-raised: #18181f;
+  --surface-input: #0d0d12;
+  --surface-hover: #22222a;
+  --panel-bg: linear-gradient(145deg, rgba(24, 24, 31, 0.88), rgba(18, 18, 22, 0.95));
+  --text: #ececf1;
+  --text-soft: rgba(236, 236, 241, 0.82);
+  --text-muted: rgba(157, 157, 181, 0.72);
+  --text-dim: rgba(115, 115, 140, 0.65);
+  --accent: #a855f7;
+  --accent-hover: #c084fc;
+  --accent-soft: rgba(168, 85, 247, 0.14);
+  --accent-subtle: rgba(168, 85, 247, 0.07);
+  --accent-line: rgba(168, 85, 247, 0.28);
+  --accent-strong: rgba(168, 85, 247, 0.52);
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, 0.15);
+  --success-line: rgba(74, 222, 128, 0.35);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.16);
+  --warning-line: rgba(251, 191, 36, 0.40);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.15);
+  --danger-line: rgba(248, 113, 113, 0.38);
+  --shadow: rgba(0, 0, 0, 0.55);
+  --grid-line: rgba(168, 85, 247, 0.025);
+  --ambient-glow-1: rgba(168, 85, 247, 0.16);
+  --ambient-glow-2: rgba(236, 72, 153, 0.08);
+  --gradient-top: #15141c;
+  --card-selected-bg: linear-gradient(145deg, rgba(38, 26, 52, 0.92), rgba(20, 16, 28, 0.95));
+  --status-card-ambient: radial-gradient(circle at 12% 0%, rgba(168, 85, 247, 0.16), transparent 48%), linear-gradient(180deg, rgba(26, 22, 34, 0.96), rgba(18, 18, 22, 0.96));
+  --feedback-banner-bg: linear-gradient(135deg, rgba(32, 26, 44, 0.95), rgba(18, 18, 22, 0.95));
+  --feedback-saving-bg: linear-gradient(135deg, rgba(38, 28, 52, 0.96), rgba(18, 18, 22, 0.96));
+  --feedback-saved-bg: linear-gradient(135deg, rgba(18, 38, 24, 0.96), rgba(12, 22, 14, 0.96));
+  --feedback-saved-title: #dcfce7;
+  --feedback-error-bg: linear-gradient(135deg, rgba(46, 20, 24, 0.96), rgba(22, 12, 14, 0.96));
+  --feedback-error-title: #ffe4e0;
+  --gauge-fill-gradient: linear-gradient(90deg, #7928ca, #a855f7, #ec4899);
+  --gauge-ready-gradient: linear-gradient(90deg, #a855f7, #4ade80);
+  --banner-fallback-bg: linear-gradient(135deg, rgba(48, 36, 16, 0.8), rgba(26, 20, 10, 0.8));
+  --banner-fallback-border: rgba(251, 191, 36, 0.36);
+  --banner-fallback-text: #fef08a;
+  --banner-unsupported-bg: linear-gradient(135deg, rgba(52, 20, 24, 0.8), rgba(28, 12, 14, 0.8));
+  --banner-unsupported-border: rgba(248, 113, 113, 0.38);
+  --banner-unsupported-text: #ffe4e0;
+  --callout-detected-bg: linear-gradient(135deg, rgba(22, 36, 26, 0.6), rgba(14, 22, 16, 0.6));
+  --callout-warning-bg: linear-gradient(135deg, rgba(48, 22, 26, 0.65), rgba(24, 12, 14, 0.65));
+  --bezel-bg: linear-gradient(180deg, #181820 0%, #101014 100%);
+  --monitor-btn-bg: rgba(28, 26, 36, 0.65);
+  --monitor-btn-hover-bg: rgba(44, 38, 58, 0.85);
+  --monitor-btn-active-bg: linear-gradient(135deg, rgba(62, 46, 88, 0.92), rgba(34, 28, 48, 0.95));
+  --meta-stat-label: var(--text-dim);
+  --meta-stat-value: var(--text);
+}
+
 [data-theme="classic"] {
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   color: var(--text, #ffffb3);
@@ -3009,6 +3073,18 @@ optgroup option {
   height: 13px;
   border-radius: 3.5px;
   border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.swatch-studio-bg {
+  background: #09090c;
+}
+
+.swatch-studio-surface {
+  background: #18181f;
+}
+
+.swatch-studio-accent {
+  background: #a855f7;
 }
 
 .swatch-classic-bg {

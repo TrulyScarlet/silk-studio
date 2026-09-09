@@ -314,6 +314,7 @@ pub struct DiagnosticsSettings {
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
     #[default]
+    Studio,
     Classic,
     Ember,
     Vamp,
@@ -345,7 +346,7 @@ impl Default for ApplicationSettings {
             minimize_to_tray: true,
             notifications_enabled: true,
             clip_sound_enabled: true,
-            theme: Theme::Classic,
+            theme: Theme::Studio,
         }
     }
 }
