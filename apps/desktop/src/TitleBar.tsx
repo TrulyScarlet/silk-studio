@@ -66,7 +66,7 @@ export function TitleBar() {
       <div className="titlebar-left" data-tauri-drag-region>
         <div className="titlebar-brand" data-tauri-drag-region>
           <span className="titlebar-logo-glyph" aria-hidden="true">
-            <SilkLogo size={14} />
+            <SilkLogo size={15} />
           </span>
           <span className="titlebar-app-title" data-tauri-drag-region>
             SILK

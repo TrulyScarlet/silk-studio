@@ -715,16 +715,16 @@ summary:focus-visible {
 }
 
 .silk-titlebar .titlebar-logo-glyph {
-  width: 20px;
-  height: 20px;
-  border-radius: 5.5px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   background: linear-gradient(135deg, var(--card-selected-bg), var(--surface-input));
   border: 1px solid var(--accent-strong);
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--accent);
-  box-shadow: 0 0 8px var(--ambient-glow-1);
+  box-shadow: 0 0 10px var(--ambient-glow-1);
   flex-shrink: 0;
   transition: all 0.2s ease;
 }

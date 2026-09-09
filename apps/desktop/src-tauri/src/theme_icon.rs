@@ -153,11 +153,11 @@ pub fn generate_theme_icon_rgba(theme: Theme) -> (Vec<u8>, u32, u32) {
     let mut rgba = vec![0_u8; size * size * 4];
 
     let center = (size as f64 - 1.0) / 2.0;
-    let half = size as f64 * 0.44;
-    let radius = size as f64 * 0.18;
-    let border_thickness = 1.6_f64;
+    let half = size as f64 * 0.485;
+    let radius = size as f64 * 0.22;
+    let border_thickness = 1.8_f64;
 
-    let glyph_scale = (size as f64 * 0.52) / (N as f64);
+    let glyph_scale = (size as f64 * 0.68) / (N as f64);
     let glyph_origin = (size as f64 - (N as f64) * glyph_scale) / 2.0;
 
     for y in 0..size {
