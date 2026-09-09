@@ -22,6 +22,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
     COINIT_MULTITHREADED, STGM_READ,
 };
+use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 
 const QPC_TIME_BASE: TimeBase = TimeBase::new(1, 10_000_000);
@@ -451,6 +452,27 @@ impl AudioCapture for WasapiAudioCapture {
             let wait =
                 unsafe { WaitForSingleObject(self.state.as_ref().expect("state").event, 50) };
             if wait.0 == WAIT_TIMEOUT {
+                // When an endpoint is silent (especially WASAPI loopback where Windows halts buffer events
+                // when no application is actively rendering audio), synthesize a silent audio frame for the
+                // elapsed interval. This keeps the stream clock continuous and prevents timeline drift,
+                // discontinuity errors, voice pacing compression, and missing tracks in the replay buffer.
+                if let Some(state) = self.state.as_mut() {
+                    let frames = (state.format.sample_rate / 20).max(1); // 50ms of frames
+                    let byte_len = (frames as usize) * state.block_align;
+                    let payload = vec![0_u8; byte_len];
+                    let mut qpc = 0_i64;
+                    let _ = unsafe { QueryPerformanceCounter(&mut qpc) };
+                    return Ok(AudioCaptureEvent::Frames(AudioFrame {
+                        stream_id: media_types::StreamId(0),
+                        sample_format: state.format.sample_format,
+                        sample_rate: state.format.sample_rate,
+                        channels: state.format.channels,
+                        sample_count: frames,
+                        pts: qpc,
+                        time_base: QPC_TIME_BASE,
+                        data: Arc::from(payload.into_boxed_slice()),
+                    }));
+                }
                 return Err(AudioCaptureError::Timeout);
             }
             if wait.0 != WAIT_OBJECT_0 {
@@ -654,10 +676,12 @@ fn read_packet(state: &mut CaptureState) -> Result<Option<AudioFrame>> {
         });
     }
 
-    let pts = if qpc_position != QPC_POSITION_INVALID {
+    let pts = if qpc_position != QPC_POSITION_INVALID && qpc_position > 0 {
         qpc_position as i64
     } else {
-        TimeBase::from_hz(state.format.sample_rate).rescale(device_position as i64, QPC_TIME_BASE)
+        let mut qpc = 0_i64;
+        let _ = unsafe { QueryPerformanceCounter(&mut qpc) };
+        qpc
     };
     Ok(Some(AudioFrame {
         stream_id: media_types::StreamId(0),
