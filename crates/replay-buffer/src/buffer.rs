@@ -21,7 +21,7 @@ impl Default for BufferConfig {
     fn default() -> Self {
         Self {
             retention_ms: 60_000,
-            max_packets_per_stream: 20_000,
+            max_packets_per_stream: 60_000,
         }
     }
 }

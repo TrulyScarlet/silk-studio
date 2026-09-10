@@ -138,7 +138,7 @@ impl Default for EngineConfig {
             video_stream_id: StreamId(0),
             video_source_id: "display-1".to_string(),
             retention_ms: 400,
-            max_packets_per_stream: 20_000,
+            max_packets_per_stream: 60_000,
             video_encoder: encoder_api::VideoEncoderConfig::default(),
             follow_source_dimensions: false,
             scaling_plan: EngineScalingPlan::default(),

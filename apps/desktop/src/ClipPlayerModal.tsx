@@ -962,16 +962,21 @@ export function ClipPlayerModal({
                 >
                   {isMasterMuted ? "🔇" : "🔊"}
                 </button>
-                <input
-                  type="range"
-                  className="volume-slider"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={isMasterMuted ? 0 : masterVolume}
-                  onChange={(e) => handleMasterVolumeChange(parseFloat(e.target.value))}
-                  aria-label="Master volume"
-                />
+                <div className="master-volume-wrap" title={`Master volume: ${Math.round(masterVolume * 100)}%`}>
+                  <input
+                    type="range"
+                    className="volume-slider"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={isMasterMuted ? 0 : masterVolume}
+                    onChange={(e) => handleMasterVolumeChange(parseFloat(e.target.value))}
+                    aria-label="Master volume"
+                  />
+                  <span className="master-volume-percent">
+                    {isMasterMuted ? "0%" : `${Math.round(masterVolume * 100)}%`}
+                  </span>
+                </div>
 
                 {/* Trimmer Toggle */}
                 <button
@@ -1055,16 +1060,30 @@ export function ClipPlayerModal({
                           type="range"
                           min={0}
                           max={1}
-                          step={0.05}
+                          step={0.01}
                           value={track.isMuted ? 0 : track.volume}
                           onChange={(e) => handleTrackVolumeChange(track.trackId, parseFloat(e.target.value))}
                           disabled={track.isMuted}
                           className="track-volume-slider"
                           aria-label={`${track.name} volume`}
                         />
-                        <span className="audio-track-vol-percent">
-                          {track.isMuted ? "0%" : `${Math.round(track.volume * 100)}%`}
-                        </span>
+                        <div className="audio-track-vol-badge" title="Click or scroll to set exact volume 0-100%">
+                          <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={track.isMuted ? 0 : Math.round(track.volume * 100)}
+                            onChange={(e) => {
+                              const val = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                              handleTrackVolumeChange(track.trackId, val / 100);
+                            }}
+                            disabled={track.isMuted}
+                            className="audio-track-vol-input"
+                            aria-label={`${track.name} volume percent`}
+                          />
+                          <span className="audio-track-vol-unit">%</span>
+                        </div>
                       </div>
                     </div>
                   ))}

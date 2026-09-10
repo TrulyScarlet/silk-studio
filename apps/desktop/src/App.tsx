@@ -944,8 +944,8 @@ export default function App() {
       setSettingsMessage("Save Replay hotkey is required.");
       return;
     }
-    if (!Number.isInteger(durationSeconds) || durationSeconds < 15 || durationSeconds > 120) {
-      setSettingsMessage("Replay duration must be a whole number from 15 to 120 seconds.");
+    if (!Number.isInteger(durationSeconds) || durationSeconds < 15 || durationSeconds > 300) {
+      setSettingsMessage("Replay duration must be a whole number from 15 to 300 seconds.");
       return;
     }
     const validatedBitrateKbps =

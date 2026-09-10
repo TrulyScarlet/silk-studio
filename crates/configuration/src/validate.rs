@@ -4,7 +4,7 @@ use crate::model::{AppConfig, MAX_AUDIO_TRACKS};
 use std::collections::BTreeSet;
 
 const MIN_REPLAY_SECONDS: u32 = 15;
-const MAX_REPLAY_SECONDS: u32 = 120;
+const MAX_REPLAY_SECONDS: u32 = 300;
 const MIN_VIDEO_BITRATE_KBPS: u32 = 2_500;
 const MAX_VIDEO_BITRATE_KBPS: u32 = 100_000;
 
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn replay_bounds_match_spec_range() {
         let mut c = base();
-        c.replay.duration_seconds = 200;
+        c.replay.duration_seconds = 301;
         assert!(validate_settings(&c)
             .iter()
             .any(|i| i.field == "replay.durationSeconds"));

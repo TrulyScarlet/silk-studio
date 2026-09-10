@@ -1814,7 +1814,7 @@ export function SettingsModal({
                                   type="range"
                                   min="0"
                                   max={MAX_AUDIO_TRACK_GAIN}
-                                  step="0.05"
+                                  step="0.01"
                                   value={Math.min(MAX_AUDIO_TRACK_GAIN, Math.max(0, track.gain))}
                                   onChange={(event) =>
                                     updateAudioTrack(track.id, (current) => ({
@@ -1863,13 +1863,13 @@ export function SettingsModal({
                   <div className="settings-group-card">
                     <label className="field">
                       <span>
-                        Replay duration <small>15-120 seconds</small>
+                        Replay duration <small>15-300 seconds (up to 5 min)</small>
                       </span>
                       <div className="input-with-suffix">
                         <input
                           type="number"
                           min="15"
-                          max="120"
+                          max="300"
                           step="1"
                           value={draft.replay.durationSeconds}
                           onChange={(event) =>
@@ -1883,6 +1883,24 @@ export function SettingsModal({
                         <span>sec</span>
                       </div>
                     </label>
+                    <div className="duration-quick-presets">
+                      {[15, 30, 60, 120, 180, 300].map((presetSec) => (
+                        <button
+                          key={presetSec}
+                          type="button"
+                          className={`preset-chip ${draft.replay.durationSeconds === presetSec ? "is-active" : ""}`}
+                          onClick={() =>
+                            updateDraft((current) => ({
+                              ...current,
+                              replay: { durationSeconds: presetSec },
+                            }))
+                          }
+                          disabled={settingsBusy}
+                        >
+                          {presetSec >= 60 ? `${presetSec / 60}m` : `${presetSec}s`}
+                        </button>
+                      ))}
+                    </div>
 
                     <div className="field directory-field">
                       <div className="directory-label">
