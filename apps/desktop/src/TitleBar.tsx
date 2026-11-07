@@ -62,21 +62,16 @@ export function TitleBar() {
       data-tauri-drag-region
       onDoubleClick={() => void handleToggleMaximize()}
     >
-      {/* Left Branding */}
-      <div className="titlebar-left" data-tauri-drag-region>
+      {/* Centered app identity and draggable title-bar space */}
+      <div className="titlebar-center" data-tauri-drag-region>
         <div className="titlebar-brand" data-tauri-drag-region>
           <span className="titlebar-logo-glyph" aria-hidden="true">
-            <SilkLogo size={15} />
+            <SilkLogo size={18} />
           </span>
           <span className="titlebar-app-title" data-tauri-drag-region>
-            SILK
+            Silk
           </span>
         </div>
-      </div>
-
-      {/* Center Draggable Space */}
-      <div className="titlebar-center" data-tauri-drag-region>
-        <span className="titlebar-empty-drag" data-tauri-drag-region />
       </div>
 
       {/* High-Precision Native-Feel Window Controls */}
@@ -128,7 +123,7 @@ export function TitleBar() {
           type="button"
           className="titlebar-btn titlebar-btn-close"
           onClick={handleClose}
-          title="Close (Minimizes to tray)"
+          title="Close Silk"
           aria-label="Close"
           tabIndex={-1}
         >

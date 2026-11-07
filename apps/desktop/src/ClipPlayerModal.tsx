@@ -1,3 +1,4 @@
+import { Icon } from "./Icon";
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type { ClipEntry, ClipMarker } from "./types";
@@ -18,11 +19,11 @@ type ClipPlayerModalProps = {
 };
 
 const MARKER_COLORS = [
-  { hex: "#ef4444", label: "Red (Death / Mistake)" },
-  { hex: "#22c55e", label: "Green (Kill / Highlight)" },
+  { hex: "#dd7b7b", label: "Red (Death / Mistake)" },
+  { hex: "#75bda4", label: "Green (Kill / Highlight)" },
   { hex: "#eab308", label: "Yellow (Strategy / Rotation)" },
-  { hex: "#3b82f6", label: "Blue (Utility / Callout)" },
-  { hex: "#a855f7", label: "Purple (Key Moment)" },
+  { hex: "#7cb1ce", label: "Blue (Utility / Callout)" },
+  { hex: "#d4a76a", label: "Purple (Key Moment)" },
 ];
 
 function formatTime(seconds: number): string {
@@ -667,7 +668,7 @@ export function ClipPlayerModal({
         includedAudioTracks: isAllSelected ? undefined : selectedTrimTracks,
       });
 
-      setTrimMessage("✓ Trim complete! New clip saved to library.");
+      setTrimMessage("Trim complete. New clip saved to library.");
       await onRefreshLibrary();
     } catch (err) {
       setTrimMessage(`Trimming failed: ${String(err)}`);
@@ -718,7 +719,7 @@ export function ClipPlayerModal({
               onClick={() => setIsTheaterMode(!isTheaterMode)}
               title="Toggle Theater Mode (T)"
             >
-              {isTheaterMode ? "⬚ Standard View" : "⬚ Theater Mode"}
+              {isTheaterMode ? "Standard View" : "Theater Mode"}
             </button>
             <button
               type="button"
@@ -734,7 +735,7 @@ export function ClipPlayerModal({
               onClick={onClose}
               aria-label="Close clip player"
             >
-              ✕
+              <Icon name="close" />
             </button>
           </div>
         </div>
@@ -780,7 +781,7 @@ export function ClipPlayerModal({
               {/* Codec Extension Missing Banner */}
               {videoDecodeError ? (
                 <div className="clip-player-codec-banner">
-                  <span className="codec-banner-icon" aria-hidden="true">⚠️</span>
+                  <span className="codec-banner-icon" aria-hidden="true"><Icon name="warning" /></span>
                   <div className="codec-banner-body">
                     <strong>Playback Codec Notice</strong>
                     <p>{videoDecodeError}</p>
@@ -805,7 +806,7 @@ export function ClipPlayerModal({
                         onClick={() => void handleSwitchToH264()}
                         disabled={switchedToH264}
                       >
-                        {switchedToH264 ? "✓ Switched to H.264" : "Switch Future Clips to H.264"}
+                        {switchedToH264 ? "Switched to H.264" : "Switch Future Clips to H.264"}
                       </button>
                     </div>
                   </div>
@@ -906,7 +907,7 @@ export function ClipPlayerModal({
                   onClick={togglePlay}
                   aria-label={isPlaying ? "Pause" : "Play"}
                 >
-                  {isPlaying ? "⏸ Pause" : "▶ Play"}
+                  {isPlaying ? "Pause" : "Play"}
                 </button>
                 <button
                   type="button"
@@ -949,7 +950,7 @@ export function ClipPlayerModal({
                     onClick={() => setMixerOpen(!mixerOpen)}
                     title="Audio Tracks Mixer"
                   >
-                    🎛 Audio Tracks ({audioTracks.length})
+                    Audio Tracks ({audioTracks.length})
                   </button>
                 ) : null}
 
@@ -960,7 +961,7 @@ export function ClipPlayerModal({
                   onClick={toggleMute}
                   title={isMasterMuted ? "Unmute (M)" : "Mute (M)"}
                 >
-                  {isMasterMuted ? "🔇" : "🔊"}
+                  <Icon name={isMasterMuted ? "mute" : "audio"} />
                 </button>
                 <div className="master-volume-wrap" title={`Master volume: ${Math.round(masterVolume * 100)}%`}>
                   <input
@@ -984,7 +985,7 @@ export function ClipPlayerModal({
                   className={`button button-small ${trimActive ? "button-accent" : "button-secondary"}`}
                   onClick={() => setTrimActive(!trimActive)}
                 >
-                  ✂ {trimActive ? "Close Trimmer" : "Trim Clip"}
+                  {trimActive ? "Close Trimmer" : "Trim Clip"}
                 </button>
 
                 {/* Sleek Fullscreen Symbol Button */}
@@ -996,7 +997,7 @@ export function ClipPlayerModal({
                   aria-label={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
                 >
                   <span aria-hidden="true" style={{ fontSize: "16px", lineHeight: 1 }}>
-                    {isFullscreen ? "🗗" : "⛶"}
+                    <Icon name={isFullscreen ? "collapse" : "expand"} />
                   </span>
                 </button>
               </div>
@@ -1008,7 +1009,7 @@ export function ClipPlayerModal({
               <div className="audio-mixer-drawer">
                 <div className="audio-mixer-header">
                   <div>
-                    <strong>🎛 Audio Tracks Mixer ({audioTracks.length} tracks playing together)</strong>
+                    <strong>Audio Tracks Mixer ({audioTracks.length} tracks playing together)</strong>
                     <p className="audio-mixer-subtitle">
                       All enabled tracks play simultaneously. Adjust volume or mute individual tracks below.
                     </p>
@@ -1095,7 +1096,7 @@ export function ClipPlayerModal({
             {trimActive ? (
               <div className="trimmer-panel">
                 <div className="trimmer-header">
-                  <strong>✂ Clip Trimmer & Track Export</strong>
+                  <strong>Clip Trimmer & Track Export</strong>
                   <span>
                     Trim range: <strong>{formatTime(trimStart)}</strong> to{" "}
                     <strong>{formatTime(trimEnd)}</strong> (Duration:{" "}
@@ -1197,7 +1198,7 @@ export function ClipPlayerModal({
           <div className={`vod-review-panel ${isTheaterMode ? "is-theater-sidebar" : ""}`}>
             <div className="vod-review-header">
               <div>
-                <strong>🎯 VOD Review & Timestamps</strong>
+                <strong>VOD Review & Timestamps</strong>
                 <span className="vod-meta-badge">{markers.length} markers</span>
               </div>
             </div>
@@ -1277,7 +1278,7 @@ export function ClipPlayerModal({
                       title="Delete marker"
                       aria-label="Delete marker"
                     >
-                      ✕
+                      <Icon name="close" />
                     </button>
                   </div>
                 ))}

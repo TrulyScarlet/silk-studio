@@ -22,6 +22,10 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 
+// Windows toasts are separate top-level visual feedback and require their own
+// in-game presentation test before they can be re-enabled.
+const WINDOWS_TOAST_VALIDATED: bool = false;
+
 pub(crate) struct TauriEventSink<R: Runtime>(AppHandle<R>);
 
 impl<R: Runtime> shell::EventSink for TauriEventSink<R> {
@@ -51,7 +55,9 @@ fn notify_from_event<R: Runtime>(
     event: &ControllerEvent,
     notifications_enabled: bool,
 ) {
-    if !notifications_enabled {
+    // A toast is another visible top-level window during gameplay. Keep it
+    // suspended along with the native HUD until the active-cue gate passes.
+    if !should_send_visual_notification(notifications_enabled) {
         return;
     }
     let Some((title, body)) = notification_content(event) else {
@@ -64,6 +70,10 @@ fn notify_from_event<R: Runtime>(
             &format!("desktop notification failed: {error}"),
         );
     }
+}
+
+fn should_send_visual_notification(notifications_enabled: bool) -> bool {
+    WINDOWS_TOAST_VALIDATED && notifications_enabled
 }
 
 pub(crate) fn notification_content(event: &ControllerEvent) -> Option<(&'static str, String)> {
@@ -577,6 +587,15 @@ fn app_window_is_maximized(app: AppHandle) -> bool {
 }
 
 fn main() {
+    // Claim the instance slot before Tauri creates the WebView window so a
+    // second launch exits without flashing a duplicate app window.
+    let instance_guard = match app_controller::SingleInstanceGuard::try_acquire(
+        "dev.silk.project.single_instance",
+    ) {
+        Ok(guard) => guard,
+        Err(_) => std::process::exit(0),
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -616,7 +635,7 @@ fn main() {
             app_window_is_fullscreen,
             update_theme_icon
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let log_path = app
                 .path()
                 .app_log_dir()
@@ -628,27 +647,7 @@ fn main() {
                 ..diagnostics::LoggerConfig::default()
             });
 
-            let instance_guard = match app_controller::SingleInstanceGuard::try_acquire(
-                "dev.silk.project.single_instance",
-            ) {
-                Ok(guard) => guard,
-                Err(_) => {
-                    diagnostics::warn(
-                        "startup",
-                        "another Silk instance is already running; exiting duplicate process",
-                    );
-                    std::process::exit(0);
-                }
-            };
             app.manage(instance_guard);
-
-            // Clear stale WebView2 cache so new frontend UI builds load immediately without stale caching
-            if let Ok(local_data) = app.path().app_local_data_dir() {
-                let eb_default = local_data.join("EBWebView").join("Default");
-                let _ = std::fs::remove_dir_all(eb_default.join("Cache"));
-                let _ = std::fs::remove_dir_all(eb_default.join("Code Cache"));
-                let _ = std::fs::remove_dir_all(eb_default.join("GPUCache"));
-            }
 
             let config_path = match app.path().app_config_dir() {
                 Ok(directory) => directory.join("config.json"),
@@ -742,7 +741,13 @@ fn main() {
 mod main_tests {
     use app_controller::ControllerEvent;
 
-    use super::notification_content;
+    use super::{notification_content, should_send_visual_notification};
+
+    #[test]
+    fn unvalidated_visual_feedback_suppresses_windows_toasts_even_when_requested() {
+        assert!(!should_send_visual_notification(true));
+        assert!(!should_send_visual_notification(false));
+    }
 
     #[test]
     fn direct_mp4_notification_content_shows_on_clip_saved() {

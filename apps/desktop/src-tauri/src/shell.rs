@@ -1075,8 +1075,16 @@ pub fn load_startup_config(path: &Path) -> AppConfig {
             for warning in loaded.warnings {
                 diagnostics::warn("configuration", &warning);
             }
+            let mut settings = loaded.settings;
+            if settings.encoding.fidelity_mode != configuration::VideoFidelityMode::Standard {
+                diagnostics::warn(
+                    "configuration",
+                    "unsupported video fidelity preference was reset to Standard (4:2:0)",
+                );
+                settings.encoding.fidelity_mode = configuration::VideoFidelityMode::Standard;
+            }
             if let Some(version) = loaded.migrated_from {
-                if let Err(error) = configuration::save(path, &loaded.settings) {
+                if let Err(error) = configuration::save(path, &settings) {
                     diagnostics::warn(
                         "configuration",
                         &format!(
@@ -1090,7 +1098,7 @@ pub fn load_startup_config(path: &Path) -> AppConfig {
                     );
                 }
             }
-            loaded.settings
+            settings
         }
         Err(error) => {
             diagnostics::error(

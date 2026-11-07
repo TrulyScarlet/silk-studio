@@ -1,3 +1,4 @@
+import { Icon } from "./Icon";
 import { useEffect, useState, type FormEvent } from "react";
 import {
   configureSettings,
@@ -36,14 +37,12 @@ import type {
   RecorderStatus,
   StorageSummary,
   VideoCodec,
-  VideoFidelityMode,
   WindowSourceInfo,
 } from "./types";
 import { ClipThumbnail, formatBadgeDuration } from "./ClipThumbnail";
 import { ClipPlayerModal } from "./ClipPlayerModal";
 import { SettingsModal } from "./SettingsModal";
 import { TitleBar } from "./TitleBar";
-import { SilkLogo } from "./SilkLogo";
 import "./App.css";
 
 const EMPTY_STATUS: RecorderStatus = {
@@ -299,32 +298,6 @@ function normalizeTheme(raw: string | undefined | null): AppTheme {
     return raw;
   }
   return "studio";
-}
-
-function parseVideoFidelityMode(raw: string | undefined | null): VideoFidelityMode | null {
-  const norm = (raw ?? "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
-  if (norm === "standard" || norm === "clarity") {
-    return "standard";
-  }
-  if (norm === "archival_444" || norm === "archival444" || norm === "archival") {
-    return "archival_444";
-  }
-  return null;
-}
-
-function normalizeVideoFidelityMode(raw: string | undefined | null): VideoFidelityMode {
-  return parseVideoFidelityMode(raw) ?? "standard";
-}
-
-function formatVideoFidelityMode(mode: VideoFidelityMode | string | undefined | null): string {
-  const norm = normalizeVideoFidelityMode(mode);
-  switch (norm) {
-    case "standard":
-    case "clarity":
-      return "Native 1:1 Screen Resolution";
-    case "archival_444":
-      return "Archival (4:4:4)";
-  }
 }
 
 type ClipFeedback = {
@@ -600,7 +573,7 @@ export default function App() {
           deletedCount: 0,
           deletedBytes: 0,
         });
-        setLibraryMessage(`${PREVIEW_MOCK_CLIPS.length} indexed clips (preview mode)`);
+        setLibraryMessage("");
       } else {
         setLibraryMessage(`Could not scan clips: ${String(error)}`);
       }
@@ -635,7 +608,7 @@ export default function App() {
             encoding: {
               ...loaded.encoding,
               videoCodec: normalizeVideoCodec(loaded.encoding.videoCodec),
-              fidelityMode: normalizeVideoFidelityMode(loaded.encoding.fidelityMode),
+              fidelityMode: "standard",
               videoBitrateKbps:
                 typeof loaded.encoding.videoBitrateKbps === "number" &&
                 loaded.encoding.videoBitrateKbps > 0
@@ -653,7 +626,7 @@ export default function App() {
           if (isDesignPreview) {
             setSettings(PREVIEW_MOCK_SETTINGS);
             setDraft(PREVIEW_MOCK_SETTINGS);
-            setSettingsMessage(`Preview mode mock settings loaded (${String(error)}).`);
+            setSettingsMessage("Sample settings loaded. Changes apply to this preview only.");
           } else {
             setSettings(null);
             setDraft(null);
@@ -966,7 +939,7 @@ export default function App() {
       encoding: {
         ...draft.encoding,
         videoCodec: normalizeVideoCodec(draft.encoding.videoCodec),
-        fidelityMode: normalizeVideoFidelityMode(draft.encoding.fidelityMode),
+        fidelityMode: "standard",
         videoBitrateKbps: validatedBitrateKbps,
       },
       audio: {
@@ -1203,42 +1176,8 @@ export default function App() {
       <TitleBar />
 
       <main className="app-shell">
-        {/* Sleek Native-Feel Top Header */}
-        <header className="topbar">
-          <div className="brand-lockup">
-            <span className="brand-mark" aria-hidden="true">
-              <SilkLogo size={22} />
-            </span>
-            <div>
-              <p className="eyebrow">LOCAL REPLAY STUDIO</p>
-              <h1>Silk</h1>
-            </div>
-          </div>
-
-          <div className="topbar-meta">
-            {/* Prominent, sleek Settings Trigger Button */}
-            <button
-              type="button"
-              className={`settings-open-btn ${isSettingsDirty ? "has-unsaved" : ""}`}
-              onClick={() => setIsSettingsOpen(true)}
-              title="Open Settings (Ctrl+,)"
-              aria-label="Open Settings dialog"
-            >
-              <span className="settings-gear-icon" aria-hidden="true">
-                ⚙
-              </span>
-              <span className="settings-btn-text">Settings</span>
-              {isSettingsDirty && (
-                <span className="settings-unsaved-badge" title="Unsaved changes pending">
-                  •
-                </span>
-              )}
-            </button>
-          </div>
-        </header>
-
         {/* Compact Hero Status Deck */}
-        <section className="hero-status-deck" aria-labelledby="recorder-heading">
+        <section className="hero-status-deck" aria-label="Capture controls">
           {/* Main Action Bar */}
           <div className="hero-control-card">
             <div className="hero-control-top">
@@ -1255,12 +1194,8 @@ export default function App() {
                           ? "Capture Stopped"
                           : status.state}
                 </span>
+                {isDesignPreview && <span className="preview-label" title="Sample library. Recording requires the desktop app.">Preview</span>}
 
-                {captureActive && (
-                  <span className="live-buffer-pill">
-                    <span className="live-dot" /> LIVE BUFFER
-                  </span>
-                )}
               </div>
 
               <div className="hero-meta-summary">
@@ -1297,8 +1232,8 @@ export default function App() {
                   </strong>
                 </span>
                 <span className="meta-stat">
-                  <small>Fidelity</small>
-                  <strong>{formatVideoFidelityMode(draft?.encoding.fidelityMode ?? "standard")}</strong>
+                  <small>Resolution</small>
+                  <strong>Native 1:1</strong>
                 </span>
                 <span className="meta-stat">
                   <small>Saved</small>
@@ -1313,7 +1248,7 @@ export default function App() {
                 type="button"
                 onClick={() => void runCommand({ type: "save_replay" }, "Save Replay")}
               >
-                <span className="save-btn-icon" aria-hidden="true">💾</span>
+                <span className="save-btn-icon" aria-hidden="true"><Icon name="save" /></span>
                 <span className="save-btn-label">Save Replay</span>
                 <span className="button-hint">{settings?.hotkeys.saveReplay ?? "Ctrl+Shift+F10"}</span>
               </button>
@@ -1335,12 +1270,30 @@ export default function App() {
               >
                 Stop
               </button>
+
+              <button
+                type="button"
+                className={`settings-open-btn ${isSettingsDirty ? "has-unsaved" : ""}`}
+                onClick={() => setIsSettingsOpen(true)}
+                title="Open Settings (Ctrl+,)"
+                aria-label="Open Settings dialog"
+              >
+                <span className="settings-gear-icon" aria-hidden="true">
+                  <Icon name="settings" />
+                </span>
+                <span className="settings-btn-text">Settings</span>
+                {isSettingsDirty && (
+                  <span className="settings-unsaved-badge" title="Unsaved changes pending">
+                    •
+                  </span>
+                )}
+              </button>
             </div>
 
             {/* Visual Replay Buffer Gauge */}
             <div className="hero-buffer-bar-wrapper">
               <div className="hero-buffer-header">
-                <span className="hero-buffer-label">Replay Buffer Fill</span>
+                <span className="hero-buffer-label">Replay buffer</span>
                 <span className="hero-buffer-time">
                   {(status.bufferDurationMs / 1000).toFixed(1)}s /{" "}
                   {draft?.replay.durationSeconds ?? 60}s ({bufferPercent}%)
@@ -1373,7 +1326,7 @@ export default function App() {
                     <span className="feedback-spinner" aria-hidden="true" />
                   ) : clipFeedback.type === "saved" ? (
                     <span className="feedback-success-badge" aria-hidden="true">
-                      ✓
+                      <Icon name="check" />
                     </span>
                   ) : (
                     <span className="feedback-alert-badge" aria-hidden="true">
@@ -1456,8 +1409,8 @@ export default function App() {
         <section className="panel library-panel hero-library-section" aria-labelledby="library-heading">
           <div className="panel-heading library-heading">
             <div className="library-title-block">
-              <div className="library-eyebrow-row">
-                <p className="eyebrow">LOCAL ARCHIVE</p>
+              <div className="library-title-row">
+                <h2 id="library-heading">Clip library</h2>
                 <span className="library-count-pill">{clips.length} {clips.length === 1 ? "Clip" : "Clips"}</span>
                 {libraryMessage && (
                   <span className="library-message" role="status" aria-live="polite">
@@ -1465,16 +1418,15 @@ export default function App() {
                   </span>
                 )}
               </div>
-              <h2 id="library-heading">Clip Library</h2>
               <p className="panel-subtitle">
-                Instant replays saved locally to disk in full native resolution.
+                Your replays, saved on this device.
               </p>
             </div>
 
             <div className="library-toolbar">
               {/* Live Search Input */}
               <div className="library-search-box">
-                <span className="search-icon" aria-hidden="true">🔍</span>
+                <span className="search-icon" aria-hidden="true"><Icon name="search" /></span>
                 <input
                   type="text"
                   placeholder="Search clips..."
@@ -1522,7 +1474,7 @@ export default function App() {
                   aria-pressed={viewMode === "grid"}
                   title="Switch to Grid View"
                 >
-                  <span className="view-icon" aria-hidden="true">⊞</span> Grid
+                  <span className="view-icon" aria-hidden="true"><Icon name="grid" /></span> Grid
                 </button>
                 <button
                   type="button"
@@ -1531,7 +1483,7 @@ export default function App() {
                   aria-pressed={viewMode === "list"}
                   title="Switch to List View"
                 >
-                  <span className="view-icon" aria-hidden="true">☰</span> List
+                  <span className="view-icon" aria-hidden="true"><Icon name="list" /></span> List
                 </button>
               </div>
 
@@ -1625,7 +1577,7 @@ export default function App() {
           {clips.length === 0 ? (
             <div className="library-empty">
               <span className="empty-symbol" aria-hidden="true">
-                🎮
+                <Icon name="game" />
               </span>
               <p>No replay clips recorded yet.</p>
               <span>
@@ -1637,7 +1589,7 @@ export default function App() {
           ) : visibleClips.length === 0 ? (
             <div className="library-empty">
               <span className="empty-symbol" aria-hidden="true">
-                🔍
+                <Icon name="search" />
               </span>
               <p>
                 {searchQuery
@@ -1726,7 +1678,7 @@ export default function App() {
                             title="Rename clip"
                             aria-label="Rename clip"
                           >
-                            ✎
+                            <Icon name="edit" />
                           </button>
                         </div>
                       )}
@@ -1748,7 +1700,7 @@ export default function App() {
                           aria-label={clip.protected ? "Unprotect clip" : "Protect clip"}
                         >
                           <span className="favorite-star-icon" aria-hidden="true">
-                            {clip.protected ? "★" : "☆"}
+                            <Icon name="star" />
                           </span>
                         </button>
                         <button
@@ -1763,7 +1715,7 @@ export default function App() {
                           aria-label="Delete clip permanently"
                         >
                           <span className="delete-trash-icon" aria-hidden="true">
-                            🗑
+                            <Icon name="trash" />
                           </span>
                         </button>
                       </div>
@@ -1845,7 +1797,7 @@ export default function App() {
                             title="Rename clip"
                             aria-label="Rename clip"
                           >
-                            ✎
+                            <Icon name="edit" />
                           </button>
                         </div>
                       )}
@@ -1873,7 +1825,7 @@ export default function App() {
                       aria-label={clip.protected ? "Unprotect clip" : "Protect clip"}
                     >
                       <span className="favorite-star-icon" aria-hidden="true">
-                        {clip.protected ? "★" : "☆"}
+                        <Icon name="star" />
                       </span>
                     </button>
                     <button
@@ -1885,7 +1837,7 @@ export default function App() {
                       aria-label="Delete clip permanently"
                     >
                       <span className="delete-trash-icon" aria-hidden="true">
-                        🗑
+                        <Icon name="trash" />
                       </span>
                     </button>
                     <button
@@ -1904,7 +1856,7 @@ export default function App() {
                       disabled={libraryBusy || clip.missing}
                       title="Reveal in File Explorer"
                     >
-                      📁 Reveal
+                      <Icon name="folder" /> Reveal
                     </button>
                     <button
                       className="text-button danger-button"
@@ -1913,7 +1865,7 @@ export default function App() {
                       disabled={libraryBusy}
                       title="Delete clip"
                     >
-                      🗑 Delete
+                      <Icon name="trash" /> Delete
                     </button>
                   </div>
                 </article>
@@ -1946,7 +1898,7 @@ export default function App() {
           >
             <div className="native-hud-pill native-hud-pill-full native-hud-saved">
               <div className="native-hud-badge">
-                <span className="native-hud-glyph native-hud-glyph-saved">✓</span>
+                <span className="native-hud-glyph native-hud-glyph-saved"><Icon name="check" /></span>
               </div>
               <div className="native-hud-text-block">
                 <strong className="native-hud-title">Silk Captured</strong>
@@ -1985,6 +1937,8 @@ export default function App() {
           diagnosticMessage={diagnosticMessage}
           diagnosticBusy={diagnosticBusy}
           createDiagnosticPackage={createDiagnosticPackage}
+          recorderStatus={status}
+          storageSummary={storageSummary}
         />
 
         {/* Clip Player / Editor Modal */}

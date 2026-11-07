@@ -1,3 +1,4 @@
+import { Icon } from "./Icon";
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
   AppSettings,
@@ -5,9 +6,10 @@ import type {
   AudioTrackSettings,
   DiagnosticBuildInfo,
   DisplaySourceInfo,
-  FidelityCapability,
   OverlayMode,
   OverlayPosition,
+  RecorderStatus,
+  StorageSummary,
   VideoCodec,
   VideoFidelityMode,
   WindowSourceInfo,
@@ -41,32 +43,6 @@ const CODEC_OPTIONS: CodecOption[] = [
   },
 ];
 
-type FidelityOption = {
-  id: VideoFidelityMode;
-  label: string;
-  tag: string;
-  tradeoff: string;
-  limitations: string;
-};
-
-const FIDELITY_OPTIONS: FidelityOption[] = [
-  {
-    id: "standard",
-    label: "Native 1:1 Screen Resolution (Recommended)",
-    tag: "1:1 Native",
-    tradeoff:
-      "Captures your exact monitor resolution pixel-for-pixel (1080p, 1440p, or 4K). Maximum GPU performance, locked 60/120 FPS, and universal in-app playback.",
-    limitations: "Standard 4:2:0 chroma subsampling for broad device, browser, and Discord compatibility.",
-  },
-  {
-    id: "archival_444",
-    label: "Archival (4:4:4)",
-    tag: "4:4:4",
-    tradeoff: "Full-chroma intent without color subsampling for post-capture analysis and archival editing.",
-    limitations: "Requires significantly more storage bandwidth. Not supported by consumer hardware encoders on this system.",
-  },
-];
-
 const BITRATE_PRESETS = [
   { label: "16 Mbps", mbps: 16, note: "1080p Balanced" },
   { label: "30 Mbps", mbps: 30, note: "1080p Crisp" },
@@ -80,6 +56,20 @@ const MAX_AUDIO_TRACK_GAIN = 8;
 const MIN_VIDEO_BITRATE_KBPS = 2_500;
 const MAX_VIDEO_BITRATE_KBPS = 100_000;
 const DEFAULT_CUSTOM_BITRATE_MBPS = 45;
+// Keep the settings UI aligned with the release gates in src-tauri/src/hud.rs and main.rs.
+const HUD_AVAILABLE = false;
+const WINDOWS_NOTIFICATIONS_AVAILABLE = false;
+
+function ThemePreview({ theme }: { theme: AppSettings["application"]["theme"] }) {
+  return (
+    <div className="theme-preview" data-theme={theme} aria-hidden="true">
+      <div className="theme-preview-top"><strong>Silk</strong><span>Replay ready</span></div>
+      <div className="theme-preview-track"><span>Replay buffer</span><span>Rolling</span></div>
+      <div className="theme-preview-progress"><span /></div>
+      <div><span className="theme-preview-action">Save replay</span></div>
+    </div>
+  );
+}
 
 function parseVideoCodec(raw: string | undefined | null): VideoCodec | null {
   const norm = (raw ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -144,78 +134,11 @@ function formatResolution(resolution: string): string {
   }
 }
 
-function getFidelityCapability(
-  mode: VideoFidelityMode,
-  diagnosticInfo: DiagnosticBuildInfo | null,
-): FidelityCapability | null {
-  if (!diagnosticInfo?.fidelityCapabilities) {
-    return null;
-  }
-  return diagnosticInfo.fidelityCapabilities.find((cap) => cap.mode === mode) ?? null;
-}
-
 type DiagnosticStatus = {
   kind: "detected" | "warning" | "unverified";
   title: string;
   detail: string;
 };
-
-function getFidelityStatusCallout(
-  mode: VideoFidelityMode,
-  diagnosticInfo: DiagnosticBuildInfo | null,
-): DiagnosticStatus {
-  if (!diagnosticInfo) {
-    if (mode === "archival_444") {
-      return {
-        kind: "warning",
-        title: "Start-time verification required for Archival 4:4:4",
-        detail:
-          "System capabilities have not been probed yet. Archival 4:4:4 requires verified hardware support and will fail to start if unsupported.",
-      };
-    }
-    return {
-      kind: "detected",
-      title: "Standard (4:2:0) universal baseline",
-      detail:
-        "Universal 4:2:0 output compatible with all hardware and software encoders.",
-    };
-  }
-
-  const cap = getFidelityCapability(mode, diagnosticInfo);
-
-  if (mode === "standard") {
-    return {
-      kind: "detected",
-      title: "Standard (4:2:0) available",
-      detail:
-        "Universal 4:2:0 format. Supported across all discovered encoders and video players with balanced storage usage.",
-    };
-  }
-
-  if (mode === "archival_444") {
-    if (cap?.availability === "available") {
-      return {
-        kind: "detected",
-        title: "Archival 4:4:4 supported",
-        detail:
-          "End-to-end full chroma preservation is supported by the configured encoder backend. Replay files will require significantly more storage.",
-      };
-    }
-    return {
-      kind: "warning",
-      title: "Archival 4:4:4 is unsupported on this system",
-      detail:
-        cap?.issue?.message ||
-        "End-to-end 4:4:4 encoding is not supported by your hardware or encoder backend. Starting capture will be rejected by the backend.",
-    };
-  }
-
-  return {
-    kind: "unverified",
-    title: "Standard (4:2:0) active",
-    detail: "Standard video fidelity mode.",
-  };
-}
 
 type CodecAvailability = {
   hasHardware: boolean;
@@ -545,7 +468,7 @@ function NativeHudPreview({
           ) : status === "failed" ? (
             "!"
           ) : (
-            "✓"
+            <Icon name="check" />
           )}
         </span>
         <div className="mini-hud-content">
@@ -606,7 +529,7 @@ function NativeHudPreview({
             </span>
           ) : (
             <span className="native-hud-glyph native-hud-glyph-saved" aria-hidden="true">
-              ✓
+              <Icon name="check" />
             </span>
           )}
         </div>
@@ -663,6 +586,8 @@ export type SettingsModalProps = {
   diagnosticMessage: string;
   diagnosticBusy: boolean;
   createDiagnosticPackage: () => Promise<void> | void;
+  recorderStatus: RecorderStatus;
+  storageSummary: StorageSummary | null;
 };
 
 export function SettingsModal({
@@ -693,6 +618,8 @@ export function SettingsModal({
   diagnosticMessage,
   diagnosticBusy,
   createDiagnosticPackage,
+  recorderStatus,
+  storageSummary,
 }: SettingsModalProps): JSX.Element | null {
   const [activeTab, setActiveTab] = useState<SettingsTabId>("capture");
   const modalRef = useRef<HTMLDivElement>(null);
@@ -715,6 +642,31 @@ export function SettingsModal({
   }
 
   const isSettingsDirty = settings ? JSON.stringify(draft) !== JSON.stringify(settings) : false;
+
+  const estimatedClipBytes = (() => {
+    const videoBitrateKbps = draft.encoding.videoBitrateKbps ?? 45_000;
+    const seconds = Math.max(1, draft.replay.durationSeconds || 60);
+    const videoBytes = (videoBitrateKbps * 1000 * seconds) / 8;
+    const audioBytes =
+      (Math.max(0, draft.encoding.audioBitrateKbps) * 1000 * seconds *
+        draft.audio.tracks.filter((track) => track.enabled).length) / 8;
+    return (videoBytes + audioBytes) * 1.05;
+  })();
+  const freeDiskBytes = recorderStatus.saveMetrics.available_disk_space_bytes;
+  const quotaBytes = draft.storage.quotaEnabled
+    ? draft.storage.quotaGigabytes * 1024 ** 3
+    : null;
+  const remainingQuotaBytes = quotaBytes === null
+    ? null
+    : Math.max(0, quotaBytes - (storageSummary?.totalBytes ?? 0));
+  const effectiveStorageBytes = freeDiskBytes === null
+    ? remainingQuotaBytes
+    : remainingQuotaBytes === null
+      ? freeDiskBytes
+      : Math.min(freeDiskBytes, remainingQuotaBytes);
+  const estimatedClipsRemaining = effectiveStorageBytes === null
+    ? null
+    : Math.floor(effectiveStorageBytes / estimatedClipBytes);
 
   function updateAudioTrack(
     trackId: string,
@@ -835,14 +787,14 @@ export function SettingsModal({
         <div className="settings-modal-header">
           <div className="settings-header-title-group">
             <span className="settings-header-glyph" aria-hidden="true">
-              ⚙
+              <Icon name="settings" />
             </span>
             <div>
               <h2 id="settings-dialog-title" className="settings-modal-title">
                 Settings
               </h2>
               <span className="settings-modal-subtitle">
-                Configure capture targets, video fidelity, audio tracks, and shortcuts
+                Configure capture targets, bitrate, audio tracks, and shortcuts
               </span>
             </div>
           </div>
@@ -857,7 +809,7 @@ export function SettingsModal({
               title="Close Settings (Esc)"
               aria-label="Close Settings"
             >
-              ✕
+              <Icon name="close" />
             </button>
           </div>
         </div>
@@ -872,7 +824,7 @@ export function SettingsModal({
                 className={`settings-tab-btn ${activeTab === "capture" ? "is-active" : ""}`}
                 onClick={() => setActiveTab("capture")}
               >
-                <span className="tab-icon" aria-hidden="true">🎮</span>
+                <span className="tab-icon" aria-hidden="true"><Icon name="game" /></span>
                 <span className="tab-label">Capture & Hotkeys</span>
               </button>
 
@@ -881,7 +833,7 @@ export function SettingsModal({
                 className={`settings-tab-btn ${activeTab === "video" ? "is-active" : ""}`}
                 onClick={() => setActiveTab("video")}
               >
-                <span className="tab-icon" aria-hidden="true">🎬</span>
+                <span className="tab-icon" aria-hidden="true"><Icon name="video" /></span>
                 <span className="tab-label">Video & Bitrate</span>
               </button>
 
@@ -890,7 +842,7 @@ export function SettingsModal({
                 className={`settings-tab-btn ${activeTab === "audio" ? "is-active" : ""}`}
                 onClick={() => setActiveTab("audio")}
               >
-                <span className="tab-icon" aria-hidden="true">🔊</span>
+                <span className="tab-icon" aria-hidden="true"><Icon name="audio" /></span>
                 <span className="tab-label">Audio Tracks</span>
                 <span className="tab-badge">{draft.audio.tracks.length}</span>
               </button>
@@ -900,7 +852,7 @@ export function SettingsModal({
                 className={`settings-tab-btn ${activeTab === "storage" ? "is-active" : ""}`}
                 onClick={() => setActiveTab("storage")}
               >
-                <span className="tab-icon" aria-hidden="true">💾</span>
+                <span className="tab-icon" aria-hidden="true"><Icon name="save" /></span>
                 <span className="tab-label">Storage & Quota</span>
               </button>
 
@@ -909,7 +861,7 @@ export function SettingsModal({
                 className={`settings-tab-btn ${activeTab === "hud" ? "is-active" : ""}`}
                 onClick={() => setActiveTab("hud")}
               >
-                <span className="tab-icon" aria-hidden="true">🔔</span>
+                <span className="tab-icon" aria-hidden="true"><Icon name="bell" /></span>
                 <span className="tab-label">HUD & Sound</span>
               </button>
 
@@ -918,7 +870,7 @@ export function SettingsModal({
                 className={`settings-tab-btn ${activeTab === "theme" ? "is-active" : ""}`}
                 onClick={() => setActiveTab("theme")}
               >
-                <span className="tab-icon" aria-hidden="true">🎨</span>
+                <span className="tab-icon" aria-hidden="true"><Icon name="palette" /></span>
                 <span className="tab-label">Theme & App</span>
               </button>
 
@@ -927,7 +879,7 @@ export function SettingsModal({
                 className={`settings-tab-btn ${activeTab === "diagnostics" ? "is-active" : ""}`}
                 onClick={() => setActiveTab("diagnostics")}
               >
-                <span className="tab-icon" aria-hidden="true">🩺</span>
+                <span className="tab-icon" aria-hidden="true"><Icon name="activity" /></span>
                 <span className="tab-label">Diagnostics</span>
               </button>
             </nav>
@@ -1149,6 +1101,54 @@ export function SettingsModal({
                   </div>
 
                   <div className="pane-section-header" style={{ marginTop: "24px" }}>
+                    <h3>Replay Duration</h3>
+                    <p>Choose how far back each saved instant replay goes.</p>
+                  </div>
+
+                  <div className="settings-group-card">
+                    <label className="field">
+                      <span>
+                        Clip length <small>15-300 seconds (up to 5 min)</small>
+                      </span>
+                      <div className="input-with-suffix">
+                        <input
+                          type="number"
+                          min="15"
+                          max="300"
+                          step="1"
+                          value={draft.replay.durationSeconds}
+                          onChange={(event) =>
+                            updateDraft((current) => ({
+                              ...current,
+                              replay: { durationSeconds: Number(event.target.value) },
+                            }))
+                          }
+                          disabled={settingsBusy}
+                        />
+                        <span>sec</span>
+                      </div>
+                    </label>
+                    <div className="duration-quick-presets">
+                      {[15, 30, 60, 120, 180, 300].map((presetSec) => (
+                        <button
+                          key={presetSec}
+                          type="button"
+                          className={`preset-chip ${draft.replay.durationSeconds === presetSec ? "is-active" : ""}`}
+                          onClick={() =>
+                            updateDraft((current) => ({
+                              ...current,
+                              replay: { durationSeconds: presetSec },
+                            }))
+                          }
+                          disabled={settingsBusy}
+                        >
+                          {presetSec >= 60 ? `${presetSec / 60}m` : `${presetSec}s`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="pane-section-header" style={{ marginTop: "24px" }}>
                     <h3>Global Hotkeys</h3>
                     <p>Click any hotkey below and press your desired keyboard combination.</p>
                   </div>
@@ -1282,120 +1282,7 @@ export function SettingsModal({
                         return (
                           <div className={`codec-status-callout status-${status.kind}`}>
                             <div className="status-callout-icon" aria-hidden="true">
-                              {status.kind === "warning" ? "!" : status.kind === "detected" ? "✓" : "ℹ"}
-                            </div>
-                            <div className="status-callout-content">
-                              <strong>{status.title}</strong>
-                              <p>{status.detail}</p>
-                            </div>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  </div>
-
-                  <div className="pane-section-header" style={{ marginTop: "24px" }}>
-                    <h3>Video Fidelity & Chroma</h3>
-                    <p>Pixel format and color conversion intent.</p>
-                  </div>
-
-                  <div className="settings-group-card">
-                    <div
-                      className="fidelity-selection-field"
-                      role="radiogroup"
-                      aria-labelledby="fidelity-selection-heading"
-                    >
-                      <div className="fidelity-card-grid">
-                        {FIDELITY_OPTIONS.map((opt) => {
-                          const isSelected = draft.encoding.fidelityMode === opt.id;
-                          const cap = getFidelityCapability(opt.id, diagnosticInfo);
-                          const isUnsupported = cap ? cap.availability === "unsupported" : false;
-                          const isFallback = cap ? cap.availability === "fallback_only" : false;
-                          const isAvailable = cap ? cap.availability === "available" : false;
-                          const isRuntimeChecked = cap ? cap.availability === "runtime_checked" : false;
-
-                          let badgeText = "Checked when recording starts";
-                          let badgeStyle = "badge-neutral";
-
-                          if (diagnosticInfo) {
-                            if (isAvailable) {
-                              badgeText = "Available";
-                              badgeStyle = "badge-success";
-                            } else if (isRuntimeChecked) {
-                              badgeText = "Checked when recording starts";
-                              badgeStyle = "badge-runtime";
-                            } else if (isFallback) {
-                              badgeText = "Falls back to Standard";
-                              badgeStyle = "badge-fallback";
-                            } else if (isUnsupported) {
-                              badgeText = "Unsupported";
-                              badgeStyle = "badge-warning";
-                            }
-                          } else {
-                            if (opt.id === "standard") {
-                              badgeText = "Standard baseline";
-                              badgeStyle = "badge-info";
-                            } else {
-                              badgeText = "Requires verification";
-                              badgeStyle = "badge-neutral";
-                            }
-                          }
-
-                          const isBlocked =
-                            (isUnsupported || (!diagnosticInfo && opt.id === "archival_444")) &&
-                            !isSelected;
-
-                          return (
-                            <label
-                              key={opt.id}
-                              className={`fidelity-card ${isSelected ? "is-selected" : ""} ${isBlocked ? "is-blocked" : ""} ${settingsBusy ? "is-disabled" : ""} ${isSelected && isUnsupported ? "is-unsupported-selected" : ""}`}
-                              title={isBlocked ? `${opt.label} is unsupported on this system.` : undefined}
-                            >
-                              <input
-                                type="radio"
-                                name="fidelityMode"
-                                value={opt.id}
-                                checked={isSelected}
-                                onChange={() => {
-                                  if (!isBlocked) {
-                                    updateDraft((current) => ({
-                                      ...current,
-                                      encoding: { ...current.encoding, fidelityMode: opt.id },
-                                    }));
-                                  }
-                                }}
-                                disabled={settingsBusy || isBlocked}
-                                className="sr-only"
-                              />
-                              <div className="fidelity-card-header">
-                                <div className="fidelity-title-group">
-                                  <span className="fidelity-radio-dot" aria-hidden="true" />
-                                  <strong className="fidelity-name">{opt.label}</strong>
-                                </div>
-                                <span className="fidelity-tag">{opt.tag}</span>
-                              </div>
-                              <p className="fidelity-tradeoff">{opt.tradeoff}</p>
-                              <p className="fidelity-limitations">{opt.limitations}</p>
-                              <div className="fidelity-card-footer">
-                                <span className={`fidelity-avail-badge ${badgeStyle}`}>
-                                  <span className="avail-dot" aria-hidden="true" />
-                                  {badgeText}
-                                </span>
-                              </div>
-                            </label>
-                          );
-                        })}
-                      </div>
-
-                      {(() => {
-                        const status = getFidelityStatusCallout(
-                          draft.encoding.fidelityMode,
-                          diagnosticInfo,
-                        );
-                        return (
-                          <div className={`fidelity-status-callout status-${status.kind}`}>
-                            <div className="status-callout-icon" aria-hidden="true">
-                              {status.kind === "warning" ? "!" : status.kind === "detected" ? "✓" : "ℹ"}
+                              {status.kind === "warning" ? "!" : status.kind === "detected" ? <Icon name="check" /> : "ℹ"}
                             </div>
                             <div className="status-callout-content">
                               <strong>{status.title}</strong>
@@ -1456,7 +1343,7 @@ export function SettingsModal({
                         {draft.encoding.videoBitrateKbps === null ? (
                           <div className="bitrate-auto-card">
                             <span className="bitrate-auto-icon" aria-hidden="true">
-                              ⚙
+                              <Icon name="settings" />
                             </span>
                             <div className="bitrate-auto-text">
                               <strong>Auto Bitrate Active</strong>
@@ -1724,7 +1611,7 @@ export function SettingsModal({
                                 onClick={() => removeAudioTrack(track.id)}
                                 disabled={settingsBusy}
                               >
-                                ✕
+                                <Icon name="close" />
                               </button>
                             </div>
                           </div>
@@ -1861,47 +1748,6 @@ export function SettingsModal({
                   </div>
 
                   <div className="settings-group-card">
-                    <label className="field">
-                      <span>
-                        Replay duration <small>15-300 seconds (up to 5 min)</small>
-                      </span>
-                      <div className="input-with-suffix">
-                        <input
-                          type="number"
-                          min="15"
-                          max="300"
-                          step="1"
-                          value={draft.replay.durationSeconds}
-                          onChange={(event) =>
-                            updateDraft((current) => ({
-                              ...current,
-                              replay: { durationSeconds: Number(event.target.value) },
-                            }))
-                          }
-                          disabled={settingsBusy}
-                        />
-                        <span>sec</span>
-                      </div>
-                    </label>
-                    <div className="duration-quick-presets">
-                      {[15, 30, 60, 120, 180, 300].map((presetSec) => (
-                        <button
-                          key={presetSec}
-                          type="button"
-                          className={`preset-chip ${draft.replay.durationSeconds === presetSec ? "is-active" : ""}`}
-                          onClick={() =>
-                            updateDraft((current) => ({
-                              ...current,
-                              replay: { durationSeconds: presetSec },
-                            }))
-                          }
-                          disabled={settingsBusy}
-                        >
-                          {presetSec >= 60 ? `${presetSec / 60}m` : `${presetSec}s`}
-                        </button>
-                      ))}
-                    </div>
-
                     <div className="field directory-field">
                       <div className="directory-label">
                         <label htmlFor="clip-directory">Clip directory</label>
@@ -1956,6 +1802,27 @@ export function SettingsModal({
                   <div className="pane-section-header" style={{ marginTop: "24px" }}>
                     <h3>Disk Space & Storage Quota</h3>
                     <p>Prevent your hard drive from filling up with old replays.</p>
+                  </div>
+
+                  <div className="settings-group-card clip-capacity-card" aria-live="polite">
+                    <div className="clip-capacity-main">
+                      <span className="clip-capacity-label">Estimated clips you can still save</span>
+                      <strong className="clip-capacity-value">
+                        {estimatedClipsRemaining === null
+                          ? "Checking drive space…"
+                          : estimatedClipsRemaining.toLocaleString()}
+                      </strong>
+                      <span className="clip-capacity-detail">
+                        About {Math.ceil(estimatedClipBytes / 1024 ** 2).toLocaleString()} MB per
+                        {" "}{draft.replay.durationSeconds || 60}s replay
+                        {draft.capture.outputResolution !== "native" &&
+                          ` • ${formatResolution(draft.capture.outputResolution)}`}
+                      </span>
+                    </div>
+                    <p className="clip-capacity-note">
+                      Estimate uses selected bitrate, enabled audio tracks, replay length, and
+                      output drive space. Actual sizes vary with resolution, codec, and gameplay.
+                    </p>
                   </div>
 
                   <div className="settings-group-card">
@@ -2028,7 +1895,7 @@ export function SettingsModal({
                 <div className="settings-pane-section">
                   <div className="pane-section-header">
                     <h3>Native Capture HUD</h3>
-                    <p>On-screen confirmation pill when instant replays are saved or queued.</p>
+                    <p>Visual confirmation is suspended until it passes in-game frame-pacing tests.</p>
                   </div>
 
                   <div className="settings-group-card">
@@ -2045,14 +1912,15 @@ export function SettingsModal({
                             },
                           }))
                         }
-                        disabled={settingsBusy}
+                        disabled
                       />
                       <span>
-                        Show capture confirmation HUD
-                        <small>Direct2D hardware overlay. Turn off for zero game FPS impact at 240Hz+.</small>
+                        Show capture confirmation HUD (currently unavailable)
+                        <small>The native HUD caused stutter in testing. Silk will not show it during gameplay, even if it was previously enabled.</small>
                       </span>
                     </label>
 
+                    {HUD_AVAILABLE && (
                     <div className={`overlay-settings-controls ${!draft.overlay.enabled ? "is-disabled" : ""}`}>
                       <div className="overlay-subheading">
                         <span className="field-title">HUD style</span>
@@ -2288,10 +2156,10 @@ export function SettingsModal({
                           type="button"
                           className="button button-secondary overlay-test-btn"
                           onClick={() => void onTestOverlay()}
-                          disabled={settingsBusy || testOverlayBusy || !draft.overlay.enabled}
+                          disabled={settingsBusy || testOverlayBusy || !HUD_AVAILABLE || !draft.overlay.enabled}
                           title="Display a preview of the native HUD on your screen"
                         >
-                          <span>{testOverlayBusy ? "Triggering HUD..." : "▶ Test Native HUD Preview"}</span>
+                          <span>{testOverlayBusy ? "Triggering HUD..." : "Test notification"}</span>
                         </button>
                         {testOverlayMessage ? (
                           <span className="form-status overlay-test-status" role="status" aria-live="polite">
@@ -2300,11 +2168,12 @@ export function SettingsModal({
                         ) : null}
                       </div>
                     </div>
+                    )}
                   </div>
 
                   <div className="pane-section-header" style={{ marginTop: "24px" }}>
                     <h3>Sound & Notifications</h3>
-                    <p>Auditory confirmation and system tray alerts.</p>
+                    <p>Sound and replay notifications.</p>
                   </div>
 
                   <div className="settings-group-card">
@@ -2325,7 +2194,7 @@ export function SettingsModal({
                       />
                       <span>
                         Play auditory chime when clip is saved
-                        <small>Recommended if HUD overlay is disabled for high FPS gaming</small>
+                        <small>Confirmation without opening a game overlay</small>
                       </span>
                     </label>
 
@@ -2342,9 +2211,12 @@ export function SettingsModal({
                             },
                           }))
                         }
-                        disabled={settingsBusy}
+                        disabled={settingsBusy || !WINDOWS_NOTIFICATIONS_AVAILABLE}
                       />
-                      <span>Show Windows notifications when a replay is saved</span>
+                      <span>
+                        Show Windows notifications when a replay is saved (currently unavailable)
+                        <small>Visual popups are paused during performance testing. Saved notification preferences are kept.</small>
+                      </span>
                     </label>
                   </div>
                 </div>
@@ -2355,7 +2227,7 @@ export function SettingsModal({
                 <div className="settings-pane-section">
                   <div className="pane-section-header">
                     <h3>Desktop Theme</h3>
-                    <p>Select your visual aesthetic palette for the Silk window.</p>
+                    <p>Choose the colors and surfaces of your Silk window. Your recording settings stay the same.</p>
                   </div>
 
                   <div className="settings-group-card">
@@ -2383,12 +2255,8 @@ export function SettingsModal({
                           </div>
                           <span className="theme-tag">Default</span>
                         </div>
-                        <div className="theme-swatch-row" aria-hidden="true">
-                          <span className="theme-swatch swatch-studio-bg" />
-                          <span className="theme-swatch swatch-studio-surface" />
-                          <span className="theme-swatch swatch-studio-accent" />
-                        </div>
-                        <p className="theme-description">Deep obsidian violet with electric purple & neon accents.</p>
+                        <ThemePreview theme="studio" />
+                        <p className="theme-description">Graphite surfaces, silver controls, and a soft green replay signal.</p>
                       </button>
 
                       <button
@@ -2414,12 +2282,8 @@ export function SettingsModal({
                           </div>
                           <span className="theme-tag">Gold</span>
                         </div>
-                        <div className="theme-swatch-row" aria-hidden="true">
-                          <span className="theme-swatch swatch-classic-bg" />
-                          <span className="theme-swatch swatch-classic-surface" />
-                          <span className="theme-swatch swatch-classic-accent" />
-                        </div>
-                        <p className="theme-description">Original obsidian-olive with butter yellow typography.</p>
+                        <ThemePreview theme="classic" />
+                        <p className="theme-description">Olive graphite surfaces and warm gold controls.</p>
                       </button>
 
                       <button
@@ -2445,12 +2309,8 @@ export function SettingsModal({
                           </div>
                           <span className="theme-tag">Amber</span>
                         </div>
-                        <div className="theme-swatch-row" aria-hidden="true">
-                          <span className="theme-swatch swatch-ember-bg" />
-                          <span className="theme-swatch swatch-ember-surface" />
-                          <span className="theme-swatch swatch-ember-accent" />
-                        </div>
-                        <p className="theme-description">Roasted chestnut and timber with glowing amber & pale mint text.</p>
+                        <ThemePreview theme="ember" />
+                        <p className="theme-description">Deep umber surfaces and soft amber controls.</p>
                       </button>
 
                       <button
@@ -2476,12 +2336,8 @@ export function SettingsModal({
                           </div>
                           <span className="theme-tag">Crimson</span>
                         </div>
-                        <div className="theme-swatch-row" aria-hidden="true">
-                          <span className="theme-swatch swatch-vamp-bg" />
-                          <span className="theme-swatch swatch-vamp-surface" />
-                          <span className="theme-swatch swatch-vamp-accent" />
-                        </div>
-                        <p className="theme-description">Obsidian black and slate grey with crimson & soft coral red text.</p>
+                        <ThemePreview theme="vamp" />
+                        <p className="theme-description">Plum-charcoal surfaces and muted rose controls.</p>
                       </button>
                     </div>
                   </div>
@@ -2507,7 +2363,10 @@ export function SettingsModal({
                         }
                         disabled={settingsBusy}
                       />
-                      <span>Minimize to system tray when the window is closed</span>
+                      <span>
+                        Keep Silk running in the tray when the window is closed
+                        <small>Turn this off to fully quit Silk when you press X. On by default.</small>
+                      </span>
                     </label>
 
                     <label className="check-row">

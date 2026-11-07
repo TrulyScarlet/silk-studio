@@ -9,6 +9,7 @@ are the current lockfile resolutions; the full transitive closure is checked by
 
 | Dependency | Purpose | License | Linking | Distributed artifacts | Notices | Approval |
 |---|---|---|---|---|---|---|
+| Inter, Google Fonts revision v20 ([source](https://fonts.google.com/specimen/Inter), downloaded 2026-11-04) | Offline desktop UI typography, weights 400/500/600 | SIL Open Font License 1.1 | Font assets | `apps/desktop/public/fonts/inter-{400,500,600}.ttf` | Bundled `fonts/Inter-LICENSE.txt` (Rasmus Andersson) | Permissive font license; no GPL dependency |
 | serde 1.0.229 / serde_derive 1.0.229 ([crates.io](https://crates.io/crates/serde/1.0.229)) | Serialization framework | MIT OR Apache-2.0 | Static (linked) | Embedded in binaries | Yes (bundled notices at release) | Provisional |
 | serde_json 1.0.151 ([crates.io](https://crates.io/crates/serde_json/1.0.151)) | JSON configuration/events | MIT OR Apache-2.0 | Static (linked) | Embedded in binaries | Yes | Provisional |
 | sha2 0.10.9 ([crates.io](https://crates.io/crates/sha2/0.10.9)) | SHA-256 fingerprint verification for the approved external FFmpeg pair | MIT OR Apache-2.0 | Static (linked) | Embedded in binaries | Yes | Provisional |

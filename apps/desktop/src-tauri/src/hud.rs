@@ -9,6 +9,11 @@ use app_controller::ControllerEvent;
 use configuration::{OverlayMode, OverlayPosition, OverlaySettings};
 use native_hud::{HudAnchor, HudConfig, HudCue, HudMode, NativeHud};
 
+// Gate 3 failed in Valorant; do not construct a gameplay HUD until an active-cue
+// lifecycle passes the empirical presentation and frame-pacing gates.
+// Diagnostic benchmarks instantiate NativeHud directly, outside this runtime.
+const PRODUCTION_HUD_VALIDATED: bool = false;
+
 /// Map configuration overlay mode 1:1 to native HUD mode.
 pub fn map_mode(mode: OverlayMode) -> HudMode {
     match mode {
@@ -80,7 +85,7 @@ impl HudRuntime {
     /// When disabled, no HWND or background rendering thread is created.
     /// If initialization fails, logs a truthful warning and leaves HUD disabled.
     pub fn init(settings: OverlaySettings) -> Self {
-        let hud = if settings.enabled {
+        let hud = if PRODUCTION_HUD_VALIDATED && settings.enabled {
             let config = hud_config_from_settings(&settings);
             match NativeHud::try_new(config) {
                 Ok(hud) => Some(hud),
@@ -137,6 +142,9 @@ impl HudRuntime {
     /// the cue immediately under lock contention or when disabled/unavailable
     /// without cloning failure strings, formatting, or logging.
     pub fn try_dispatch_event(&self, event: &ControllerEvent) {
+        if !PRODUCTION_HUD_VALIDATED {
+            return;
+        }
         let Ok(guard) = self.inner.try_read() else {
             return;
         };
@@ -172,8 +180,9 @@ impl HudRuntime {
                 Err(p) => p.into_inner(),
             };
             let settings_changed = guard.settings != new_settings;
-            let missing_or_unhealthy =
-                new_settings.enabled && guard.hud.as_ref().is_none_or(|h| !h.is_healthy());
+            let missing_or_unhealthy = PRODUCTION_HUD_VALIDATED
+                && new_settings.enabled
+                && guard.hud.as_ref().is_none_or(|h| !h.is_healthy());
             settings_changed || missing_or_unhealthy
         };
 
@@ -181,7 +190,7 @@ impl HudRuntime {
             return;
         }
 
-        let new_hud = if new_settings.enabled {
+        let new_hud = if PRODUCTION_HUD_VALIDATED && new_settings.enabled {
             let config = hud_config_from_settings(&new_settings);
             match NativeHud::try_new(config) {
                 Ok(hud) => Some(hud),
@@ -216,6 +225,11 @@ impl HudRuntime {
     ///
     /// Returns an informative error if overlay is disabled, uninitialized, or busy.
     pub fn show_test_cue(&self) -> Result<(), String> {
+        if !PRODUCTION_HUD_VALIDATED {
+            return Err(
+                "native HUD is suspended pending in-game performance validation".to_string(),
+            );
+        }
         let guard = match self.inner.try_read() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -359,6 +373,27 @@ mod tests {
     }
 
     #[test]
+    fn test_unvalidated_runtime_does_not_create_hud_even_with_saved_enabled_setting() {
+        let enabled = OverlaySettings {
+            enabled: true,
+            ..OverlaySettings::default()
+        };
+        let runtime = HudRuntime::init(enabled);
+        assert!(!runtime.is_active());
+        assert_eq!(runtime.settings(), enabled);
+        runtime.try_dispatch_event(&ControllerEvent::SaveQueued {
+            path: "C:/clips/test.mp4".to_string(),
+        });
+        assert!(!runtime.is_active());
+
+        runtime.reconfigure(OverlaySettings::default());
+        runtime.reconfigure(enabled);
+        assert!(!runtime.is_active());
+        assert_eq!(runtime.settings(), enabled);
+        assert!(runtime.show_test_cue().unwrap_err().contains("suspended"));
+    }
+
+    #[test]
     fn test_headless_runtime_initialization() {
         let settings = OverlaySettings {
             enabled: true,
@@ -396,14 +431,14 @@ mod tests {
             ..OverlaySettings::default()
         });
         let err = disabled_runtime.show_test_cue().unwrap_err();
-        assert!(err.contains("disabled"));
+        assert!(err.contains("disabled") || err.contains("suspended"));
 
         let headless_runtime = HudRuntime::headless(OverlaySettings {
             enabled: true,
             ..OverlaySettings::default()
         });
         let err = headless_runtime.show_test_cue().unwrap_err();
-        assert!(err.contains("unavailable") || err.contains("failed"));
+        assert!(err.contains("unavailable") || err.contains("failed") || err.contains("suspended"));
     }
 
     #[test]
@@ -435,6 +470,6 @@ mod tests {
         let runtime = HudRuntime::headless(OverlaySettings::default());
         let _write_guard = runtime.inner.write().unwrap();
         let err = runtime.show_test_cue().unwrap_err();
-        assert!(err.contains("busy"));
+        assert!(err.contains("busy") || err.contains("suspended"));
     }
 }
