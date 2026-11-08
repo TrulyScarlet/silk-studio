@@ -9,6 +9,7 @@ mod chords;
 mod error;
 mod migrate;
 mod model;
+mod shortcuts;
 mod validate;
 
 pub use chords::{normalize_chord, ChordError};
@@ -18,8 +19,9 @@ pub use model::{
     AppConfig, AppTheme, ApplicationSettings, AudioSettings, AudioSourceKind, AudioTrackSettings,
     ContainerFormat, DiagnosticLogLevel, DiagnosticsSettings, EncoderSelection, EncodingSettings,
     HotkeysSettings, OutputResolution, OutputSettings, OverlayMode, OverlayPosition,
-    OverlaySettings, QualityPreset, ReplaySettings, StorageSettings, Theme, VideoFidelityMode,
-    DEFAULT_AUDIO_TRACK_GAIN, DEFAULT_FILE_NAME_PATTERN, DEFAULT_SAVE_HOTKEY, MAX_AUDIO_TRACKS,
+    OverlaySettings, QualityPreset, ReplaySettings, StorageSettings, Theme, ThemeColors,
+    VideoFidelityMode, DEFAULT_AUDIO_TRACK_GAIN, DEFAULT_FILE_NAME_PATTERN, DEFAULT_SAVE_HOTKEY,
+    MAX_AUDIO_TRACKS,
 };
 pub use validate::validate_settings;
 

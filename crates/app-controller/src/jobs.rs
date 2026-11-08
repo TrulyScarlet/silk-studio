@@ -1,10 +1,7 @@
 //! Bounded save-job dispatch (BUF-008).
 //!
-//! `SaveWorker` owns container I/O on one dedicated thread. The small
-//! `SaveJobManager` remains as a deterministic queue primitive for callers
-//! that only need to rehearse submission ordering.
+//! `SaveWorker` owns container I/O on one dedicated thread.
 
-use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -18,11 +15,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const SAVE_QUEUE_BOUND: usize = 8;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SaveJob {
-    pub clip_path: PathBuf,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum JobQueueError {
@@ -328,41 +320,6 @@ fn available_space_bytes(path: &Path) -> io::Result<u64> {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct SaveJobManager {
-    queue: Mutex<VecDeque<SaveJob>>,
-}
-
-impl SaveJobManager {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Submit a clip for writing. Serialized: callers must treat jobs as
-    /// pending until `process_next` returns them.
-    pub fn submit(&self, job: SaveJob) -> Result<(), JobQueueError> {
-        let mut guard = self.queue.lock().map_err(|_| JobQueueError::QueueFull {
-            bound: SAVE_QUEUE_BOUND,
-        })?;
-        if guard.len() >= SAVE_QUEUE_BOUND {
-            return Err(JobQueueError::QueueFull {
-                bound: SAVE_QUEUE_BOUND,
-            });
-        }
-        guard.push_back(job);
-        Ok(())
-    }
-
-    /// Pop the next job in submission order.
-    pub fn process_next(&self) -> Option<SaveJob> {
-        self.queue.lock().ok().and_then(|mut g| g.pop_front())
-    }
-
-    pub fn pending_count(&self) -> usize {
-        self.queue.lock().map(|g| g.len()).unwrap_or(0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,38 +359,6 @@ mod tests {
             }],
             captured_at_unix_ms: 0,
         }
-    }
-
-    fn job(n: u8) -> SaveJob {
-        SaveJob {
-            clip_path: PathBuf::from(format!("clip-{n}.mp4")),
-        }
-    }
-
-    #[test]
-    fn preserves_submission_order() {
-        let mgr = SaveJobManager::new();
-        for n in 0..4 {
-            mgr.submit(job(n)).expect("submit");
-        }
-        assert_eq!(mgr.pending_count(), 4);
-        for n in 0..4 {
-            let next = mgr.process_next().expect("job present");
-            assert_eq!(next.clip_path, PathBuf::from(format!("clip-{n}.mp4")));
-        }
-        assert!(mgr.process_next().is_none());
-    }
-
-    #[test]
-    fn enforces_bound() {
-        let mgr = SaveJobManager::new();
-        for n in 0..SAVE_QUEUE_BOUND {
-            assert!(mgr.submit(job(n as u8)).is_ok());
-        }
-        assert!(matches!(
-            mgr.submit(job(u8::MAX)),
-            Err(JobQueueError::QueueFull { bound }) if bound == SAVE_QUEUE_BOUND
-        ));
     }
 
     #[test]

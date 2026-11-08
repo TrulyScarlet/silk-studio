@@ -57,9 +57,6 @@ impl SingleInstanceGuard {
             }
         }
     }
-
-    /// Force-release (crash-recovery helper for future segments).
-    pub fn release(self) {}
 }
 
 impl Drop for SingleInstanceGuard {
@@ -107,9 +104,20 @@ mod tests {
 
     #[test]
     fn distinct_names_do_not_conflict() {
-        let a = SingleInstanceGuard::try_acquire(&unique_name("a")).expect("a");
-        let b = SingleInstanceGuard::try_acquire(&unique_name("b")).expect("b");
+        let name_a = unique_name("a");
+        let name_b = unique_name("b");
+        let a = SingleInstanceGuard::try_acquire(&name_a).expect("a");
+        let b = SingleInstanceGuard::try_acquire(&name_b).expect("b");
+
+        // Verify holding both independently rejects duplicate acquisition for each name
+        assert!(SingleInstanceGuard::try_acquire(&name_a).is_err());
+        assert!(SingleInstanceGuard::try_acquire(&name_b).is_err());
+
         drop(a);
+        assert!(SingleInstanceGuard::try_acquire(&name_a).is_ok());
+        assert!(SingleInstanceGuard::try_acquire(&name_b).is_err());
+
         drop(b);
+        assert!(SingleInstanceGuard::try_acquire(&name_b).is_ok());
     }
 }

@@ -1,3 +1,4 @@
+import { Icon } from "./Icon";
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ClipEntry } from "./types";
@@ -85,6 +86,12 @@ export function ClipThumbnail({
         ref={containerRef}
         className={`clip-thumb-wrapper clip-thumb-fallback ${onClick ? "is-clickable" : ""} ${className}`}
         onClick={onClick}
+        onKeyDown={(event) => {
+          if (onClick && (event.key === "Enter" || event.key === " ")) {
+            event.preventDefault();
+            onClick();
+          }
+        }}
         role={onClick ? "button" : undefined}
         tabIndex={onClick ? 0 : undefined}
         aria-label={clip.missing ? "Missing clip file" : `Preview ${clip.name}`}
@@ -102,7 +109,7 @@ export function ClipThumbnail({
             )}
             {clip.protected && (
               <span className="clip-thumb-protected-badge" title="Protected clip">
-                🛡
+                <Icon name="shield" />
               </span>
             )}
             {durationText && (
@@ -121,6 +128,12 @@ export function ClipThumbnail({
       ref={containerRef}
       className={`clip-thumb-wrapper ${onClick ? "is-clickable" : ""} ${className}`}
       onClick={onClick}
+      onKeyDown={(event) => {
+        if (onClick && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onClick();
+        }
+      }}
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
       title={onClick ? `Watch ${clip.name}` : undefined}
@@ -157,7 +170,7 @@ export function ClipThumbnail({
           )}
           {clip.protected && (
             <span className="clip-thumb-protected-badge" title="Protected clip">
-              🛡
+              <Icon name="shield" />
             </span>
           )}
           {durationText && (

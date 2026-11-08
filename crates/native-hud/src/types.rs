@@ -62,17 +62,14 @@ impl HudAnchor {
         matches!(self, Self::CenterLeft | Self::CenterRight)
     }
 
-    /// Whether this anchor belongs to the left family (flush left).
     pub const fn is_left(&self) -> bool {
         matches!(self, Self::TopLeft | Self::CenterLeft | Self::BottomLeft)
     }
 
-    /// Whether this anchor belongs to the right family (flush right).
     pub const fn is_right(&self) -> bool {
         matches!(self, Self::TopRight | Self::CenterRight | Self::BottomRight)
     }
 
-    /// Whether this anchor is horizontally centered.
     pub const fn is_center_x(&self) -> bool {
         matches!(self, Self::TopCenter | Self::BottomCenter)
     }

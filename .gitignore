@@ -10,3 +10,8 @@ portfolio-op1/
 .DS_Store
 Thumbs.db
 .slim/deepwork/
+/.taste-skill/
+*.key
+*.pfx
+*.p12
+*.pem

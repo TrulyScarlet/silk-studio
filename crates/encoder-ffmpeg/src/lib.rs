@@ -77,6 +77,8 @@ pub enum InvocationError {
 
     #[error("audio tracks require a positive per-track audio bitrate")]
     InvalidAudioBitrate,
+    #[error("audio mixing requires 1–8 source tracks and one planned output track")]
+    InvalidAudioMix,
 }
 
 /// Build the first share-oriented export command without starting a process.
@@ -119,6 +121,12 @@ pub fn build_invocation(
     if job.plan.audio_track_count > 0 && job.plan.audio_bitrate_bps == 0 {
         return Err(InvocationError::InvalidAudioBitrate);
     }
+    if job
+        .mix_audio_tracks
+        .is_some_and(|count| !(1..=8).contains(&count) || job.plan.audio_track_count != 1)
+    {
+        return Err(InvocationError::InvalidAudioMix);
+    }
 
     let mut args = Vec::new();
     push_arg(&mut args, "-hide_banner");
@@ -128,9 +136,21 @@ pub fn build_invocation(
     args.push(job.source_path.as_os_str().to_os_string());
     push_arg(&mut args, "-map");
     push_arg(&mut args, "0:v:0");
-    for track in 0..job.plan.audio_track_count {
+    if let Some(count) = job.mix_audio_tracks {
+        let inputs = (0..count)
+            .map(|track| format!("[0:a:{track}]"))
+            .collect::<String>();
+        push_arg(&mut args, "-filter_complex");
+        push_arg(&mut args, format!("{inputs}amix=inputs={count}:duration=longest:normalize=0,alimiter=limit=0.95:level=0:latency=1[share_audio]"));
         push_arg(&mut args, "-map");
-        push_arg(&mut args, format!("0:a:{track}?"));
+        push_arg(&mut args, "[share_audio]");
+        push_arg(&mut args, "-ac:a:0");
+        push_arg(&mut args, "2");
+    } else {
+        for track in 0..job.plan.audio_track_count {
+            push_arg(&mut args, "-map");
+            push_arg(&mut args, format!("0:a:{track}?"));
+        }
     }
     push_arg(&mut args, "-c:v");
     push_arg(&mut args, H264_VIDEO_ENCODER);
@@ -257,6 +277,33 @@ mod tests {
                 "mp4",
                 "exports\\share.mp4.part",
             ]
+        );
+    }
+
+    #[test]
+    fn sharing_mix_maps_every_source_into_one_stereo_output() {
+        let invocation = build_invocation("ffmpeg.exe", &job(1).with_audio_mix(3)).unwrap();
+        let args = strings(&invocation.args);
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "-map").count(), 2);
+        let filter = args
+            .windows(2)
+            .find(|pair| pair[0] == "-filter_complex")
+            .unwrap();
+        assert!(filter[1].starts_with("[0:a:0][0:a:1][0:a:2]amix=inputs=3:"));
+        assert!(filter[1].contains("alimiter="));
+        assert!(args.windows(2).any(|pair| pair == ["-ac:a:0", "2"]));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("0:a:") || arg == "-b:a:1"));
+        for invalid in [0, 9] {
+            assert_eq!(
+                build_invocation("ffmpeg.exe", &job(1).with_audio_mix(invalid)),
+                Err(InvocationError::InvalidAudioMix)
+            );
+        }
+        assert_eq!(
+            build_invocation("ffmpeg.exe", &job(2).with_audio_mix(2)),
+            Err(InvocationError::InvalidAudioMix)
         );
     }
 

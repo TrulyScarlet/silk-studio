@@ -27,13 +27,30 @@ pub(crate) fn create_capture_device() -> CaptureResult<CapturingDevice> {
 fn try_create(
     driver_type: windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE,
 ) -> CaptureResult<CapturingDevice> {
+    create_on_adapter(None, driver_type)
+}
+
+/// Desktop duplication requires a device on the adapter owning the output.
+pub(crate) fn create_output_device(
+    adapter: &windows::Win32::Graphics::Dxgi::IDXGIAdapter,
+) -> CaptureResult<CapturingDevice> {
+    create_on_adapter(
+        Some(adapter),
+        windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
+    )
+}
+
+fn create_on_adapter(
+    adapter: Option<&windows::Win32::Graphics::Dxgi::IDXGIAdapter>,
+    driver_type: windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE,
+) -> CaptureResult<CapturingDevice> {
     unsafe {
         let mut device: Option<ID3D11Device> = None;
         let mut context: Option<ID3D11DeviceContext> = None;
         let feature_levels = [windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0];
 
         D3D11CreateDevice(
-            None,
+            adapter,
             driver_type,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_FLAG(

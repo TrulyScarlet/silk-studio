@@ -231,56 +231,8 @@ fn validate_codecs(snapshot: &MediaSnapshot) -> Result<()> {
 }
 
 fn normalize_snapshot(snapshot: &MediaSnapshot) -> Result<MediaSnapshot> {
-    let mut shift = snapshot.origin_pts;
-    for stream in &snapshot.streams {
-        if let Some(first) = stream.packets.first() {
-            shift = shift.min(first.dts).min(first.pts);
-        }
-    }
-
-    let mut streams = Vec::with_capacity(snapshot.streams.len());
-    for stream in &snapshot.streams {
-        let mut packets = Vec::with_capacity(stream.packets.len());
-        for packet in &stream.packets {
-            let normalized_dts = packet
-                .dts
-                .checked_sub(shift)
-                .ok_or_else(|| validation_error("DTS underflow during normalization"))?;
-            if normalized_dts < 0 {
-                return Err(validation_error(format!(
-                    "post-normalization DTS is negative: {}",
-                    normalized_dts
-                )));
-            }
-
-            let normalized_pts = packet
-                .pts
-                .checked_sub(shift)
-                .ok_or_else(|| validation_error("PTS underflow during normalization"))?;
-            if normalized_pts < 0 {
-                return Err(validation_error(format!(
-                    "post-normalization PTS is negative: {}",
-                    normalized_pts
-                )));
-            }
-
-            let mut copy = (**packet).clone();
-            copy.dts = normalized_dts;
-            copy.pts = normalized_pts;
-            packets.push(std::sync::Arc::new(copy));
-        }
-        streams.push(StreamPackets {
-            descriptor: stream.descriptor.clone(),
-            packets,
-        });
-    }
-
-    let normalized = MediaSnapshot {
-        origin_pts: 0,
-        time_base: snapshot.time_base,
-        streams,
-        captured_at_unix_ms: snapshot.captured_at_unix_ms,
-    };
+    let mut normalized = snapshot.clone();
+    normalized.normalize_timestamps();
     validate_snapshot(&normalized)?;
     Ok(normalized)
 }

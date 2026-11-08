@@ -41,6 +41,9 @@ pub struct ExportJob {
     pub source_path: PathBuf,
     pub destination_path: PathBuf,
     pub plan: ExportPlan,
+    /// Mix this many source audio streams into the single planned output track.
+    /// None preserves the existing independent-track export behavior.
+    pub mix_audio_tracks: Option<u32>,
 }
 
 impl ExportJob {
@@ -53,7 +56,13 @@ impl ExportJob {
             source_path: source_path.into(),
             destination_path: destination_path.into(),
             plan,
+            mix_audio_tracks: None,
         }
+    }
+
+    pub fn with_audio_mix(mut self, source_tracks: u32) -> Self {
+        self.mix_audio_tracks = Some(source_tracks);
+        self
     }
 }
 

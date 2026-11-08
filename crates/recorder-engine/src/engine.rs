@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use audio_api::{AudioCapture, AudioCaptureConfig, AudioCaptureError, AudioCaptureEvent};
 use audio_sync::{AudioSyncConfig, AudioSyncMetrics, AudioSynchronizer};
@@ -16,6 +16,7 @@ use replay_buffer::{normalize_timestamps, BufferConfig, ReplayBuffer};
 
 use crate::error::EngineError;
 use crate::state::{validate_transition, RecorderState};
+use crate::video_timeline::VideoTimeline;
 
 pub const AUDIO_RESTART_LIMIT: u32 = 3;
 pub const VIDEO_RESTART_LIMIT: u32 = 5;
@@ -541,6 +542,7 @@ impl RecorderEngine {
             return Err(err.into());
         }
 
+        let capture_started_at = Instant::now();
         self.transition_to(RecorderState::Starting)?;
         let audio_inputs = std::mem::take(&mut self.pending_audio);
 
@@ -595,6 +597,7 @@ impl RecorderEngine {
 
         let scaling_plan = self.config.scaling_plan;
         let worker_config = VideoWorkerConfig {
+            capture_started_at,
             encoder_config: self.config.video_encoder.clone(),
             scaling_plan,
             follow_source_dimensions: self.config.follow_source_dimensions,
@@ -785,6 +788,7 @@ fn update_registered_video_descriptor(
 }
 
 struct VideoWorkerConfig {
+    capture_started_at: Instant,
     encoder_config: encoder_api::VideoEncoderConfig,
     scaling_plan: EngineScalingPlan,
     follow_source_dimensions: bool,
@@ -950,6 +954,7 @@ fn run_video_worker(
     worker_shared: VideoWorkerShared,
 ) {
     let VideoWorkerConfig {
+        capture_started_at,
         mut encoder_config,
         scaling_plan,
         follow_source_dimensions,
@@ -998,12 +1003,14 @@ fn run_video_worker(
 
     let mut primed_reported = false;
     let mut encoder_epoch = encoder.epoch();
+    let mut timeline = VideoTimeline::default();
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
         match capture.next_event() {
-            Ok(VideoCaptureEvent::Frame(frame)) => {
+            Ok(VideoCaptureEvent::Frame(mut frame)) => {
+                timeline.map(&mut frame);
                 let encode_result = match scaling_mode {
                     WorkerScalingMode::Preferred2xPending { ref base_config } => {
                         let base_cfg = base_config.clone();
@@ -1233,6 +1240,7 @@ fn run_video_worker(
                     });
                     break;
                 }
+                timeline.restarted(capture_started_at.elapsed());
                 match resolve_video_scaling(
                     &*capture,
                     encoder,
@@ -2240,6 +2248,128 @@ mod tests {
             time_base: TimeBase::MILLISECOND,
             payload: FramePayload::Cpu(Arc::from(&[0_u8][..])),
         }
+    }
+
+    #[test]
+    fn display_recovery_retains_full_audio_on_three_tracks() {
+        let buffer = Arc::new(Mutex::new(ReplayBuffer::new(BufferConfig::default())));
+        let descriptor = StreamDescriptor {
+            stream_id: StreamId(0),
+            media_type: MediaType::Video,
+            time_base: TimeBase::MILLISECOND,
+            name: None,
+            codec: "h264".into(),
+            extradata: None,
+            width: Some(1920),
+            height: Some(1080),
+            sample_rate: None,
+            channels: None,
+            pixel_format: None,
+        };
+        buffer
+            .lock()
+            .unwrap()
+            .register_stream(descriptor.clone())
+            .unwrap();
+        for id in 1..=3 {
+            buffer
+                .lock()
+                .unwrap()
+                .register_stream(audio_stream_descriptor(
+                    StreamId(id),
+                    "GoXLR track",
+                    &encoder_api::AudioEncoderConfig::default(),
+                ))
+                .unwrap();
+        }
+        let mut timeline = VideoTimeline::default();
+        timeline.map(&mut test_video_frame(10_000));
+        // Audio continues on the recording clock across multiple display losses.
+        for restart_ms in [10_500, 21_000, 40_000] {
+            timeline.restarted(Duration::from_millis(restart_ms));
+            reset_video_buffer_epoch(&buffer, &descriptor).unwrap();
+            for source_ms in (0..=2_000).step_by(20) {
+                let mut frame = test_video_frame(source_ms);
+                timeline.map(&mut frame);
+                let mut packet = EncodedPacket {
+                    stream_id: StreamId(0),
+                    media_type: MediaType::Video,
+                    pts: frame.pts,
+                    dts: frame.pts,
+                    duration: 20,
+                    time_base: TimeBase::MILLISECOND,
+                    is_keyframe: source_ms == 0,
+                    sequence: 0,
+                    payload: PacketPayload::from(vec![0x65]),
+                };
+                buffer.lock().unwrap().insert(packet.clone()).unwrap();
+                packet.media_type = MediaType::Audio;
+                packet.pts = restart_ms as i64 + source_ms;
+                packet.dts = packet.pts;
+                packet.is_keyframe = true;
+                for id in 1..=3 {
+                    packet.stream_id = StreamId(id);
+                    buffer.lock().unwrap().insert(packet.clone()).unwrap();
+                }
+            }
+            let mut snapshot = buffer
+                .lock()
+                .unwrap()
+                .snapshot(restart_ms as i64)
+                .unwrap()
+                .media;
+            normalize_timestamps(&mut snapshot);
+            assert_eq!(snapshot.streams.len(), 4);
+            for stream in snapshot.streams {
+                assert_eq!(
+                    stream.packets.len(),
+                    101,
+                    "every track spans the recovered clip"
+                );
+                assert_eq!(stream.packets.first().unwrap().pts, 0);
+                assert_eq!(stream.packets.last().unwrap().pts, 2_000);
+            }
+        }
+    }
+
+    #[test]
+    fn worker_maps_reset_source_timestamps_after_each_recovery() {
+        let capture = ScalingMockCapture::with_gpu(vec![
+            VideoCaptureEvent::Frame(test_video_frame(0)),
+            VideoCaptureEvent::Frame(test_video_frame(10_000)),
+            VideoCaptureEvent::SourceLost,
+            VideoCaptureEvent::Frame(test_video_frame(0)),
+            VideoCaptureEvent::Frame(test_video_frame(33)),
+            VideoCaptureEvent::SourceLost,
+            VideoCaptureEvent::Frame(test_video_frame(0)),
+            VideoCaptureEvent::Frame(test_video_frame(33)),
+        ]);
+        let mut engine = RecorderEngine::new(
+            EngineConfig {
+                retention_ms: 1,
+                ..EngineConfig::default()
+            },
+            Box::new(capture),
+            Box::new(ScalingMockEncoder::new()),
+            Box::new(EngineTestMuxer),
+        );
+        engine.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !engine.worker_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(engine.worker_finished());
+        assert!(
+            engine
+                .buffer
+                .lock()
+                .unwrap()
+                .metrics()
+                .newest_video_dts
+                .unwrap()
+                >= 10_068
+        );
+        engine.stop().unwrap();
     }
 
     #[test]

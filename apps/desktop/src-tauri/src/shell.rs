@@ -6,7 +6,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use app_controller::{
@@ -16,7 +16,7 @@ use app_controller::{
 #[cfg(windows)]
 use audio_wasapi::WasapiAudioCapture;
 #[cfg(windows)]
-use capture_windows::WgcDisplayCapture;
+use capture_windows::DisplayCapture;
 use chrono::Utc;
 use clip_library::{ClipEntry, LibraryError, LibraryWorker, StoragePolicy, StorageSummary};
 use configuration::{AppConfig, AudioSourceKind, HotkeysSettings};
@@ -64,7 +64,9 @@ pub struct ShellState {
     minimize_to_tray: AtomicBool,
     notifications_enabled: AtomicBool,
     clip_sound_enabled: AtomicBool,
+    clip_sound_volume: AtomicU16,
     exit_requested: AtomicBool,
+    updating: AtomicBool,
     last_foreground_process: Mutex<Option<String>>,
 }
 
@@ -104,6 +106,7 @@ impl ShellState {
     ) -> Self {
         let notifications_enabled = settings.application.notifications_enabled;
         let clip_sound_enabled = settings.application.clip_sound_enabled;
+        let clip_sound_volume = settings.application.clip_sound_volume;
         let managed_output_dir = managed_clip_directory(Path::new(&settings.output.directory));
         if let Err(error) = std::fs::create_dir_all(&managed_output_dir) {
             diagnostics::warn(
@@ -137,13 +140,23 @@ impl ShellState {
             minimize_to_tray: AtomicBool::new(minimize_to_tray),
             notifications_enabled: AtomicBool::new(notifications_enabled),
             clip_sound_enabled: AtomicBool::new(clip_sound_enabled),
+            clip_sound_volume: AtomicU16::new(clip_sound_volume),
             exit_requested: AtomicBool::new(false),
+            updating: AtomicBool::new(false),
             last_foreground_process: Mutex::new(None),
         }
     }
 
     pub fn request_exit(&self) {
         self.exit_requested.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_updating(&self) -> bool {
+        self.updating.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_updating(&self, updating: bool) {
+        self.updating.store(updating, Ordering::Release);
     }
 
     pub(crate) fn close_action(&self) -> CloseAction {
@@ -155,6 +168,10 @@ impl ShellState {
 
     pub(crate) fn notifications_enabled(&self) -> bool {
         self.notifications_enabled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn clip_sound_volume(&self) -> u16 {
+        self.clip_sound_volume.load(Ordering::Acquire)
     }
 
     pub(crate) fn clip_sound_enabled(&self) -> bool {
@@ -1024,7 +1041,7 @@ fn build_controller_with_mode(
 
         #[cfg(windows)]
         let video: Box<dyn capture_api::VideoCapture> = if use_real_capture {
-            Box::new(WgcDisplayCapture::new(StreamId(0)))
+            Box::new(DisplayCapture::new(StreamId(0)))
         } else if use_real_encoder {
             Box::new(
                 ScriptedVideoCapture::new(vec![VideoStep::Frames(scripted_frame_count)])
@@ -1075,8 +1092,16 @@ pub fn load_startup_config(path: &Path) -> AppConfig {
             for warning in loaded.warnings {
                 diagnostics::warn("configuration", &warning);
             }
+            let mut settings = loaded.settings;
+            if settings.encoding.fidelity_mode != configuration::VideoFidelityMode::Standard {
+                diagnostics::warn(
+                    "configuration",
+                    "unsupported video fidelity preference was reset to Standard (4:2:0)",
+                );
+                settings.encoding.fidelity_mode = configuration::VideoFidelityMode::Standard;
+            }
             if let Some(version) = loaded.migrated_from {
-                if let Err(error) = configuration::save(path, &loaded.settings) {
+                if let Err(error) = configuration::save(path, &settings) {
                     diagnostics::warn(
                         "configuration",
                         &format!(
@@ -1090,7 +1115,7 @@ pub fn load_startup_config(path: &Path) -> AppConfig {
                     );
                 }
             }
-            loaded.settings
+            settings
         }
         Err(error) => {
             diagnostics::error(
@@ -1178,6 +1203,9 @@ pub fn app_settings(state: &ShellState) -> Result<AppConfig, String> {
 /// Validate, apply, and atomically persist all settings currently exposed by
 /// the S7 settings view. Runtime state is rolled back if persistence fails.
 pub fn apply_app_settings(state: &ShellState, settings: &AppConfig) -> Result<(), String> {
+    if state.is_updating() {
+        return Err("Silk is restarting to install an update.".into());
+    }
     let bindings = hotkey_bindings(&settings.hotkeys).map_err(|error| error.to_string())?;
     let mut stored_settings = state
         .settings
@@ -1267,6 +1295,9 @@ pub fn apply_app_settings(state: &ShellState, settings: &AppConfig) -> Result<()
     state
         .clip_sound_enabled
         .store(settings.application.clip_sound_enabled, Ordering::Release);
+    state
+        .clip_sound_volume
+        .store(settings.application.clip_sound_volume, Ordering::Release);
     set_diagnostic_level(settings.diagnostics.logging_level);
     if let Err(error) = apply_startup_registration(settings.application.start_with_windows) {
         diagnostics::warn("startup", &error);
@@ -1406,6 +1437,7 @@ fn with_rollback(
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecorderStatus {
+    pub capture_target: Option<String>,
     pub state: String,
     pub buffer_duration_ms: i64,
     pub buffered_packet_count: usize,
@@ -1415,11 +1447,33 @@ pub struct RecorderStatus {
 }
 
 pub fn recorder_status(state: &ShellState) -> Result<RecorderStatus, String> {
+    let source_id = state
+        .settings
+        .lock()
+        .map_err(|e| e.to_string())?
+        .capture
+        .source_id
+        .clone();
+    let target = capture_windows::capture_target_window(&source_id).map(|(window, fullscreen)| {
+        let name = app_controller::clean_game_name(
+            window.app_name.as_deref().unwrap_or(&window.title),
+            Some(&window.title),
+        );
+        format!(
+            "{name} · {}",
+            if fullscreen { "Fullscreen" } else { "Windowed" }
+        )
+    });
     let controller = state
         .controller
         .lock()
         .map_err(|error| format!("controller lock poisoned: {error}"))?;
     Ok(RecorderStatus {
+        capture_target: if controller.state().to_string() == "Stopped" {
+            None
+        } else {
+            target
+        },
         state: controller.state().to_string(),
         buffer_duration_ms: controller.buffer_duration_ms(),
         buffered_packet_count: controller.buffered_packet_count(),
@@ -1514,6 +1568,41 @@ pub(crate) fn emit_event(sink: &dyn EventSink, event: &ControllerEvent) {
     sink.emit(event);
 }
 
+/// Drain accepted clip saves before replacing the executable. Installer data
+/// backups have fixed names and do not include clip payloads.
+pub(crate) fn prepare_for_update(state: &ShellState, sink: &dyn EventSink) -> Result<(), String> {
+    let events = state
+        .controller
+        .lock()
+        .map_err(|e| e.to_string())?
+        .execute(&Command::StopCapture);
+    for event in &events {
+        emit_event(sink, event);
+    }
+    // Wait for any catalog operation already in flight before taking its backup.
+    let _library = state.library.lock().map_err(|e| e.to_string())?;
+    let _settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let directory = state
+        .config_path
+        .parent()
+        .ok_or("Settings directory unavailable")?;
+    let backup = directory.join("update-backup");
+    std::fs::create_dir_all(&backup).map_err(|e| format!("Could not back up settings: {e}"))?;
+    for source in [
+        &state.config_path,
+        &library_catalog_path(&state.config_path),
+    ] {
+        if source.exists() {
+            std::fs::copy(
+                source,
+                backup.join(source.file_name().ok_or("Invalid settings filename")?),
+            )
+            .map_err(|e| format!("Could not back up settings: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Execute one allowlisted command and forward every produced event.
 /// This is exactly what the `recorder_command` Tauri handler runs.
 pub fn execute_command(
@@ -1538,6 +1627,13 @@ pub fn execute_command(
             .controller
             .lock()
             .map_err(|err| format!("controller lock poisoned: {err}"))?;
+        if state.is_updating() {
+            return if command == &Command::Poll {
+                Ok(())
+            } else {
+                Err("Silk is restarting to install an update.".into())
+            };
+        }
         let mut events = dispatch_hotkey_events(&mut guard, hotkey_events, attribution.as_ref());
         let hotkey_already_saved = events
             .iter()

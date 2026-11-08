@@ -363,18 +363,20 @@ impl Default for VideoEncoderConfig {
 }
 
 impl VideoEncoderConfig {
-    /// Validate settings before a backend is touched. Backend-specific trial
-    /// configuration still runs after this common validation.
-    pub fn validate(&self) -> Result<()> {
-        if self.width == 0 || self.height == 0 {
-            return Err(EncoderError::UnsupportedConfiguration {
-                reason: "video dimensions must be positive".to_string(),
-            });
-        }
-        if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
-            return Err(EncoderError::UnsupportedConfiguration {
-                reason: "video output dimensions must be even".to_string(),
-            });
+    /// Validate settings before a backend is touched. When `follow_source_dimensions`
+    /// is true, native source dimensions are unresolved until capture begins.
+    pub fn validate_with_source_resolution(&self, follow_source_dimensions: bool) -> Result<()> {
+        if !follow_source_dimensions {
+            if self.width == 0 || self.height == 0 {
+                return Err(EncoderError::UnsupportedConfiguration {
+                    reason: "video dimensions must be positive".to_string(),
+                });
+            }
+            if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
+                return Err(EncoderError::UnsupportedConfiguration {
+                    reason: "video output dimensions must be even".to_string(),
+                });
+            }
         }
         if !matches!(self.fps, 30 | 60 | 120) {
             return Err(EncoderError::UnsupportedConfiguration {
@@ -406,6 +408,12 @@ impl VideoEncoderConfig {
             });
         }
         Ok(())
+    }
+
+    /// Validate settings before a backend is touched. Backend-specific trial
+    /// configuration still runs after this common validation.
+    pub fn validate(&self) -> Result<()> {
+        self.validate_with_source_resolution(false)
     }
 
     /// Number of encoded frames between keyframes, rounded to the nearest

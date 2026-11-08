@@ -6,11 +6,15 @@
 //! receives plain-data events. All handler logic lives in `shell`, which
 //! is unit-tested without launching a window.
 
+mod file_drag;
 mod hud;
+mod sharing;
 mod shell;
 mod sound;
 mod theme_icon;
 mod tray;
+mod updates;
+mod window_presentation;
 
 #[cfg(test)]
 mod shell_tests;
@@ -22,6 +26,10 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 
+// Windows toasts are separate top-level visual feedback and require their own
+// in-game presentation test before they can be re-enabled.
+const WINDOWS_TOAST_VALIDATED: bool = false;
+
 pub(crate) struct TauriEventSink<R: Runtime>(AppHandle<R>);
 
 impl<R: Runtime> shell::EventSink for TauriEventSink<R> {
@@ -32,14 +40,20 @@ impl<R: Runtime> shell::EventSink for TauriEventSink<R> {
         let _ = self.0.emit("controller-event", event);
         tray::update_from_event(&self.0, event);
 
-        let (notifications_enabled, clip_sound_enabled) = self
+        let (notifications_enabled, clip_sound_enabled, clip_sound_volume) = self
             .0
             .try_state::<shell::ShellState>()
-            .map(|state| (state.notifications_enabled(), state.clip_sound_enabled()))
-            .unwrap_or((true, true));
+            .map(|state| {
+                (
+                    state.notifications_enabled(),
+                    state.clip_sound_enabled(),
+                    state.clip_sound_volume(),
+                )
+            })
+            .unwrap_or((true, true, 100));
 
         if sound::should_play_clip_sound(event, clip_sound_enabled) {
-            sound::play_clip_saved_sound();
+            let _ = sound::play_clip_saved_sound(clip_sound_volume);
         }
 
         notify_from_event(&self.0, event, notifications_enabled);
@@ -51,7 +65,9 @@ fn notify_from_event<R: Runtime>(
     event: &ControllerEvent,
     notifications_enabled: bool,
 ) {
-    if !notifications_enabled {
+    // A toast is another visible top-level window during gameplay. Keep it
+    // suspended along with the native HUD until the active-cue gate passes.
+    if !should_send_visual_notification(notifications_enabled) {
         return;
     }
     let Some((title, body)) = notification_content(event) else {
@@ -64,6 +80,10 @@ fn notify_from_event<R: Runtime>(
             &format!("desktop notification failed: {error}"),
         );
     }
+}
+
+fn should_send_visual_notification(notifications_enabled: bool) -> bool {
+    WINDOWS_TOAST_VALIDATED && notifications_enabled
 }
 
 pub(crate) fn notification_content(event: &ControllerEvent) -> Option<(&'static str, String)> {
@@ -154,13 +174,15 @@ fn configure_settings(
 }
 
 #[tauri::command]
-fn update_theme_icon(app: AppHandle, theme: String) -> Result<(), String> {
-    let t = match theme.as_str() {
-        "classic" => configuration::Theme::Classic,
-        "ember" => configuration::Theme::Ember,
-        "vamp" => configuration::Theme::Vamp,
-        _ => configuration::Theme::Studio,
-    };
+fn update_theme_icon(
+    app: AppHandle,
+    state: State<'_, shell::ShellState>,
+    theme: String,
+) -> Result<(), String> {
+    // Keep the IPC payload compatible, but never let a late frontend effect
+    // overwrite the native icon with an older theme after a newer settings save.
+    let _ = theme;
+    let t = shell::app_settings(&state)?.application.theme;
     theme_icon::apply_theme_icon(&app, t);
 
     if let Some(window) = app.get_webview_window("main") {
@@ -268,6 +290,21 @@ fn export_diagnostics(
         format!("[DIAGNOSTIC_EXPORT_FAILED] log directory unavailable: {error}")
     })?;
     shell::export_diagnostics(&settings, &log_directory)
+}
+
+#[tauri::command]
+fn get_clip_frame_rate(path: String) -> Result<f64, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let size = file.metadata().map_err(|e| e.to_string())?.len();
+    let reader = mp4::Mp4Reader::read_header(std::io::BufReader::new(file), size)
+        .map_err(|e| e.to_string())?;
+    Ok(reader
+        .tracks()
+        .values()
+        .find(|track| matches!(track.track_type(), Ok(mp4::TrackType::Video)))
+        .map(|track| track.frame_rate())
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .unwrap_or(60.0))
 }
 
 #[tauri::command]
@@ -473,6 +510,11 @@ async fn trim_clip(request: TrimClipRequest) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn test_clip_sound(volume: u16) -> Result<(), String> {
+    sound::play_clip_saved_sound(volume)
+}
+
+#[tauri::command]
 async fn test_overlay(app: AppHandle) -> Result<(), String> {
     let Some(hud) = app.try_state::<hud::HudRuntime>() else {
         return Err("native HUD runtime is unavailable".to_string());
@@ -513,55 +555,21 @@ fn app_window_close(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn app_window_set_fullscreen(app: AppHandle, fullscreen: bool) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("main") {
-        if fullscreen {
-            win.set_fullscreen(true).map_err(|e| e.to_string())?;
-        } else {
-            win.set_fullscreen(false).map_err(|e| e.to_string())?;
-
-            #[cfg(target_os = "windows")]
-            {
-                use windows_sys::Win32::Foundation::RECT;
-                use windows_sys::Win32::UI::WindowsAndMessaging::{
-                    GetSystemMetrics, SetWindowPos, SystemParametersInfoW, SM_CXPADDEDBORDER,
-                    SM_CXSIZEFRAME, SM_CYSIZEFRAME, SPI_GETWORKAREA, SWP_FRAMECHANGED,
-                    SWP_NOACTIVATE, SWP_NOZORDER,
-                };
-
-                if let Ok(hwnd) = win.hwnd() {
-                    let hwnd = hwnd.0;
-                    unsafe {
-                        let mut wa: RECT = std::mem::zeroed();
-                        SystemParametersInfoW(
-                            SPI_GETWORKAREA,
-                            0,
-                            &mut wa as *mut RECT as *mut _,
-                            0,
-                        );
-
-                        let border_x =
-                            GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
-                        let border_y =
-                            GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
-
-                        SetWindowPos(
-                            hwnd,
-                            std::ptr::null_mut(),
-                            wa.left - border_x,
-                            wa.top - border_y,
-                            (wa.right - wa.left) + border_x * 2,
-                            (wa.bottom - wa.top) + border_y * 2,
-                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                        );
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
+async fn app_window_set_fullscreen(app: AppHandle, fullscreen: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window unavailable")?;
+    let (send, mut receive) = tauri::async_runtime::channel(1);
+    app.run_on_main_thread(move || {
+        let result = window_presentation::set_fullscreen(&window, fullscreen);
+        let _ = send.try_send(result);
+    })
+    .map_err(|error| error.to_string())?;
+    receive
+        .recv()
+        .await
+        .ok_or("fullscreen transition was interrupted")?
 }
-
 #[tauri::command]
 fn app_window_is_fullscreen(app: AppHandle) -> bool {
     app.get_webview_window("main")
@@ -577,12 +585,35 @@ fn app_window_is_maximized(app: AppHandle) -> bool {
 }
 
 fn main() {
+    // Claim the instance slot before Tauri creates the WebView window so a
+    // second launch exits without flashing a duplicate app window.
+    let instance_guard = match app_controller::SingleInstanceGuard::try_acquire(
+        "dev.silk.project.single_instance",
+    ) {
+        Ok(guard) => guard,
+        Err(_) => std::process::exit(0),
+    };
+
+    let context = tauri::generate_context!();
+    if let Err(error) = theme_icon::initialize_taskbar_identity(&context.config().identifier) {
+        eprintln!("could not initialize taskbar identity: {error}");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             ping,
+            updates::get_update_status,
+            updates::check_for_updates,
+            updates::install_update,
+            sharing::prepare_clip_share,
+            sharing::clip_share_status,
+            sharing::cancel_clip_share,
+            sharing::drag_clip_share,
+            sharing::reveal_clip_share,
             recorder_command,
             pick_clip_directory,
             configure_hotkeys,
@@ -603,8 +634,10 @@ fn main() {
             get_diagnostic_info,
             export_diagnostics,
             test_overlay,
+            test_clip_sound,
             trim_clip,
             get_clip_keyframes,
+            get_clip_frame_rate,
             get_clip_audio_tracks,
             extract_clip_audio_track,
             open_url,
@@ -616,7 +649,7 @@ fn main() {
             app_window_is_fullscreen,
             update_theme_icon
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let log_path = app
                 .path()
                 .app_log_dir()
@@ -628,27 +661,10 @@ fn main() {
                 ..diagnostics::LoggerConfig::default()
             });
 
-            let instance_guard = match app_controller::SingleInstanceGuard::try_acquire(
-                "dev.silk.project.single_instance",
-            ) {
-                Ok(guard) => guard,
-                Err(_) => {
-                    diagnostics::warn(
-                        "startup",
-                        "another Silk instance is already running; exiting duplicate process",
-                    );
-                    std::process::exit(0);
-                }
-            };
             app.manage(instance_guard);
-
-            // Clear stale WebView2 cache so new frontend UI builds load immediately without stale caching
-            if let Ok(local_data) = app.path().app_local_data_dir() {
-                let eb_default = local_data.join("EBWebView").join("Default");
-                let _ = std::fs::remove_dir_all(eb_default.join("Cache"));
-                let _ = std::fs::remove_dir_all(eb_default.join("Code Cache"));
-                let _ = std::fs::remove_dir_all(eb_default.join("GPUCache"));
-            }
+            app.manage(window_presentation::FullscreenState::default());
+            app.manage(sharing::ShareRuntime::default());
+            app.manage(updates::UpdateRuntime::new(app.package_info().version.to_string()));
 
             let config_path = match app.path().app_config_dir() {
                 Ok(directory) => directory.join("config.json"),
@@ -678,9 +694,15 @@ fn main() {
                 config_path,
                 settings.application.minimize_to_tray,
             ));
+            sound::initialize();
+            updates::start_checks(app.handle().clone());
             app.manage(hud::HudRuntime::init(settings.overlay));
             tray::setup(app)?;
             theme_icon::apply_theme_icon(app.handle(), settings.application.theme);
+            // Publish native icons and Shell identity before Explorer sees the window.
+            if let Some(window) = app.get_webview_window("main") {
+                window.show()?;
+            }
 
             if let Some(window) = app.get_webview_window("main") {
                 let (r, g, b) = match settings.application.theme {
@@ -734,15 +756,26 @@ fn main() {
             Ok(())
         })
         .on_window_event(tray::handle_window_event)
-        .run(tauri::generate_context!())
-        .expect("error while running the Silk desktop shell");
+        .build(context)
+        .expect("error while building the Silk desktop shell")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                theme_icon::cleanup_theme_icon(app);
+            }
+        });
 }
 
 #[cfg(test)]
 mod main_tests {
     use app_controller::ControllerEvent;
 
-    use super::notification_content;
+    use super::{notification_content, should_send_visual_notification};
+
+    #[test]
+    fn unvalidated_visual_feedback_suppresses_windows_toasts_even_when_requested() {
+        assert!(!should_send_visual_notification(true));
+        assert!(!should_send_visual_notification(false));
+    }
 
     #[test]
     fn direct_mp4_notification_content_shows_on_clip_saved() {

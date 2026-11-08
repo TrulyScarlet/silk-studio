@@ -35,6 +35,50 @@ fn ping_round_trip_format() {
 }
 
 #[test]
+fn update_shutdown_preserves_settings_catalog_and_saved_clip() {
+    let dir = TempDir::new("update-preservation").unwrap();
+    let config_path = dir.path().join("config.json");
+    let mut settings = AppConfig::default();
+    settings.hotkeys.save_replay = "CTRL+ALT+F7".into();
+    settings.application.check_for_updates = false;
+    configuration::save(&config_path, &settings).unwrap();
+    let state = shell::ShellState::with_app_config(
+        shell::build_controller(dir.path().to_path_buf()),
+        None,
+        settings.clone(),
+        config_path.clone(),
+        true,
+    );
+    let clip = dir.path().join("existing.mp4");
+    std::fs::write(&clip, b"unchanged clip bytes").unwrap();
+    let config_before = std::fs::read(&config_path).unwrap();
+    let catalog = dir.path().join("library.json");
+    std::fs::write(&catalog, b"existing catalog fixture").unwrap();
+    state.set_updating(true);
+    let sink = CollectingSink::default();
+    shell::prepare_for_update(&state, &sink).unwrap();
+    assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(
+        std::fs::read(dir.path().join("update-backup/config.json")).unwrap(),
+        config_before
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("update-backup/library.json")).unwrap(),
+        b"existing catalog fixture"
+    );
+    assert_eq!(std::fs::read(&clip).unwrap(), b"unchanged clip bytes");
+    assert!(shell::execute_command(&state, &sink, &Command::StartCapture).is_err());
+    assert!(shell::execute_command(&state, &sink, &Command::Poll).is_ok());
+    assert!(shell::apply_app_settings(&state, &AppConfig::default()).is_err());
+    assert_eq!(
+        configuration::load(&config_path).unwrap().settings,
+        settings
+    );
+    state.set_updating(false);
+    assert!(!state.is_updating());
+}
+
+#[test]
 fn close_defaults_to_tray_but_explicit_exit_is_allowed() {
     assert_eq!(shell::close_action(true, false), shell::CloseAction::Hide);
     assert_eq!(shell::close_action(true, true), shell::CloseAction::Exit);
@@ -47,6 +91,7 @@ fn configured_start_stop_bindings_use_stable_actions_and_ids() {
         save_replay: "Ctrl+Shift+F10".to_string(),
         start_capture: Some("Ctrl+F9".to_string()),
         stop_capture: Some("Ctrl+F8".to_string()),
+        ..HotkeysSettings::default()
     };
     let bindings = shell::hotkey_bindings(&settings).expect("valid bindings");
 
@@ -75,6 +120,7 @@ fn duplicate_configured_chord_is_rejected_before_registration() {
         save_replay: "Ctrl+Shift+F10".to_string(),
         start_capture: Some("shift+ctrl+f10".to_string()),
         stop_capture: None,
+        ..HotkeysSettings::default()
     };
 
     assert!(matches!(
@@ -699,11 +745,13 @@ fn shell_state_applies_and_persists_clip_sound_and_theme_settings() {
 
     let mut next_settings = initial_settings.clone();
     next_settings.application.clip_sound_enabled = false;
+    next_settings.application.clip_sound_volume = 250;
     next_settings.application.theme = serde_json::from_str("\"ember\"").expect("ember theme");
 
     shell::apply_app_settings(&state, &next_settings).expect("apply settings");
 
     assert!(!state.clip_sound_enabled());
+    assert_eq!(state.clip_sound_volume(), 250);
     let current = shell::app_settings(&state).expect("app settings");
     assert!(!current.application.clip_sound_enabled);
     assert_eq!(
@@ -714,6 +762,7 @@ fn shell_state_applies_and_persists_clip_sound_and_theme_settings() {
     // Verify persisted config on disk
     let loaded = configuration::load(&config_path).expect("loaded config");
     assert!(!loaded.settings.application.clip_sound_enabled);
+    assert_eq!(loaded.settings.application.clip_sound_volume, 250);
     assert_eq!(
         serde_json::to_value(loaded.settings.application.theme).unwrap(),
         "ember"
@@ -740,10 +789,12 @@ fn shell_state_preserves_runtime_clip_sound_on_persistence_failure() {
 
     let mut next_settings = initial_settings.clone();
     next_settings.application.clip_sound_enabled = false;
+    next_settings.application.clip_sound_volume = 250;
     next_settings.application.theme = serde_json::from_str("\"ember\"").expect("ember theme");
 
     let result = shell::apply_app_settings(&state, &next_settings);
     assert!(result.is_err(), "expected persistence failure");
+    assert_eq!(state.clip_sound_volume(), 100);
 
     // Runtime clip_sound_enabled and stored settings must not have changed
     assert!(state.clip_sound_enabled());

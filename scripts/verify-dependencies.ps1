@@ -72,8 +72,11 @@ if (Test-Path -LiteralPath $inventoryPath -PathType Leaf) {
     if ($inventory -notmatch "FFmpeg") {
         Add-Failure "The FFmpeg decision row is missing from the license inventory."
     }
-    if ($Strict -and $inventory -match "Provisional") {
+    if ($Strict -and $inventory -match '(?m)^\|.*\|\s*Provisional\s*\|\s*$') {
         Add-Failure "License inventory still contains provisional approvals."
+    }
+    if ($Strict -and -not (Test-Path -LiteralPath (Join-Path $root 'licenses/THIRD_PARTY_NOTICES.txt'))) {
+        Add-Failure 'Generated third-party notices are missing.'
     }
 }
 

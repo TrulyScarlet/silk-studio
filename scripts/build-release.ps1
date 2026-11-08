@@ -1,53 +1,41 @@
 [CmdletBinding()]
 param()
-
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-
-& pwsh -NoProfile -File (Join-Path $PSScriptRoot "release-preflight.ps1") -Release
-if ($LASTEXITCODE -ne 0) {
-    throw "Release preflight failed; no release build was attempted."
-}
-
+. (Join-Path $PSScriptRoot 'release-tools.ps1')
 Push-Location $root
 try {
-    & cargo tauri build --config "apps\desktop\src-tauri\tauri.conf.json" --ci
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo tauri build failed with exit code $LASTEXITCODE."
+    $sourceChanges = git status --porcelain | Where-Object {
+        $_ -ne '?? .agents/' -and $_ -ne '?? skills-lock.json'
     }
-} finally {
-    Pop-Location
-}
-
-$bundleDirectory = Join-Path $root "target\release\bundle"
-$certificate = [Environment]::GetEnvironmentVariable("SILK_WINDOWS_CERTIFICATE_THUMBPRINT")
-$timestampUrl = [Environment]::GetEnvironmentVariable("SILK_WINDOWS_TIMESTAMP_URL")
-$artifacts = @(
-    Get-ChildItem -LiteralPath (Join-Path $root "target\release") -File -ErrorAction Stop |
-        Where-Object { $_.Extension -ieq ".exe" }
-    Get-ChildItem -LiteralPath $bundleDirectory -Recurse -File -ErrorAction Stop |
-        Where-Object { $_.Extension -ieq ".exe" }
-) | Sort-Object -Property FullName -Unique
-if ($artifacts.Count -eq 0) {
-    throw "No executable release artifacts were found under $bundleDirectory."
-}
-
-foreach ($artifact in $artifacts) {
-    & signtool sign /sha1 $certificate /fd SHA256 /tr $timestampUrl /td SHA256 $artifact.FullName
-    if ($LASTEXITCODE -ne 0) {
-        throw "signtool failed for $($artifact.Name) with exit code $LASTEXITCODE."
+    if ($sourceChanges) { throw 'Commit the release source before building distributable artifacts.' }
+    $env:SILK_BUILD_COMMIT = (git rev-parse HEAD).Trim()
+    $env:SILK_BUILD_DATE = (git show -s --format=%cI HEAD).Trim()
+    $env:SILK_RELEASE_BUILD = '1'
+    if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+        $localKey = Join-Path $env:LOCALAPPDATA 'Silk\signing\updater.key'
+        if (Test-Path -LiteralPath $localKey) { $env:TAURI_SIGNING_PRIVATE_KEY = $localKey }
     }
-    & signtool verify /pa /all $artifact.FullName
-    if ($LASTEXITCODE -ne 0) {
-        throw "signature verification failed for $($artifact.Name)."
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'release-preflight.ps1') -Release -RunAudits
+    if ($LASTEXITCODE -ne 0) { throw 'Release preflight failed; no release was built.' }
+    # Sign the exe before bundling, then the installer before the updater signature.
+    $signingConfig = Join-Path $root 'target\release-signing.json'
+    @{ bundle = @{ windows = @{
+        certificateThumbprint = $env:SILK_WINDOWS_CERTIFICATE_THUMBPRINT
+        timestampUrl = $env:SILK_WINDOWS_TIMESTAMP_URL
+        tsp = $true
+    } } } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $signingConfig -Encoding utf8
+    Push-Location (Join-Path $root 'apps\desktop')
+    try {
+        & cargo tauri build --bundles nsis --ci --config $signingConfig
+        if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
+    } finally { Pop-Location }
+    $version = (Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+    $installer = Join-Path $root "target\release\bundle\nsis\Silk_${version}_x64-setup.exe"
+    foreach ($artifact in @((Join-Path $root 'target\release\silk.exe'), $installer)) {
+        & signtool verify /pa /all $artifact
+        if ($LASTEXITCODE -ne 0) { throw "Publisher signature verification failed: $artifact" }
     }
-}
-
-$manifestPath = Join-Path $bundleDirectory "SHA256SUMS.txt"
-$lines = foreach ($artifact in $artifacts | Sort-Object FullName) {
-    $relative = [System.IO.Path]::GetRelativePath($root, $artifact.FullName)
-    $hash = (Get-FileHash -LiteralPath $artifact.FullName -Algorithm SHA256).Hash
-    "$hash  $relative"
-}
-Set-Content -LiteralPath $manifestPath -Value $lines -Encoding ascii
-Write-Output "Signed artifacts and hash manifest written to $manifestPath"
+    & (Join-Path $PSScriptRoot 'write-update-manifest.ps1') -Installer $installer -Version $version
+    Write-Output "Release ready: $installer and latest.json. Publish both with the .sig and SHA256SUMS.txt on GitHub release v$version."
+} finally { Pop-Location }

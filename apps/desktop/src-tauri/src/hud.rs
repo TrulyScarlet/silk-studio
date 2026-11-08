@@ -1,6 +1,6 @@
 //! Native HUD runtime integration for desktop capture feedback.
 //!
-//! Replaces the legacy WebView-based overlay with a lightweight, zero-window-mutation
+//! Replaces the legacy WebView-based overlay with a lightweight, retained-surface
 //! Direct2D / DirectComposition HUD window managed on a dedicated worker thread.
 
 use std::sync::{Mutex, RwLock};
@@ -42,11 +42,10 @@ pub fn hud_config_from_settings(settings: &OverlaySettings) -> HudConfig {
 
 /// Map controller events to corresponding HUD cues.
 ///
-/// Only `SaveQueued`, `ClipSaved`, `SaveFailed`, and `save_replay` `CommandRejected`
+/// Only `ClipSaved`, `SaveFailed`, and `save_replay` `CommandRejected`
 /// produce visual cues. All other controller events return `None`.
 pub fn cue_for_event(event: &ControllerEvent) -> Option<HudCue> {
     match event {
-        ControllerEvent::SaveQueued { .. } => Some(HudCue::queued()),
         ControllerEvent::ClipSaved {
             duration_ms,
             size_bytes,
@@ -295,7 +294,7 @@ mod tests {
         let queued_event = ControllerEvent::SaveQueued {
             path: "C:/clips/test.mp4".to_string(),
         };
-        assert_eq!(cue_for_event(&queued_event), Some(HudCue::queued()));
+        assert_eq!(cue_for_event(&queued_event), None);
 
         let saved_event = ControllerEvent::ClipSaved {
             path: "C:/clips/test.mp4".to_string(),

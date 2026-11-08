@@ -9,6 +9,7 @@
 mod engine;
 mod error;
 mod state;
+mod video_timeline;
 
 pub use engine::{
     AudioInput, EngineConfig, EngineEvent, EngineScalingPlan, RecorderEngine,
