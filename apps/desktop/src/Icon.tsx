@@ -1,6 +1,9 @@
-type IconName = "settings" | "save" | "search" | "grid" | "list" | "game" | "video" | "audio" | "bell" | "palette" | "activity" | "trash" | "edit" | "shield" | "star" | "play" | "check" | "close" | "folder" | "warning" | "mute" | "expand" | "collapse";
+type IconName = "share" | "keyboard" | "settings" | "save" | "search" | "grid" | "list" | "game" | "video" | "audio" | "bell" | "palette" | "activity" | "trash" | "edit" | "shield" | "star" | "play" | "check" | "close" | "folder" | "warning" | "mute" | "expand" | "collapse" | "chevronLeft" | "chevronRight";
 
 const paths: Record<IconName, string> = {
+  share: "M12 15V3m-4 4 4-4 4 4M5 11H3v10h18V11h-2",
+  chevronLeft: "m15 5-7 7 7 7",
+  chevronRight: "m9 5 7 7-7 7",
   check: "m5 12 4 4L19 6",
   close: "m6 6 12 12M6 18 18 6",
   folder: "M3 5h7l2 3h9v12H3V5Z",
@@ -22,6 +25,7 @@ const paths: Record<IconName, string> = {
   trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7",
   edit: "m4 16-1 5 5-1L20 8l-4-4L4 16Zm9-9 4 4",
   shield: "m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6",
+  keyboard: "M3 5h18v14H3z M6 9h1m3 0h1m3 0h1m3 0h1M6 12h1m3 0h1m3 0h1m3 0h1M7 16h10",
   star: "m12 3 3 6 6 1-4.5 4.5 1 6.5L12 18l-5.5 3 1-6.5L3 10l6-1 3-6Z",
   play: "m8 5 11 7-11 7V5Z",
 };

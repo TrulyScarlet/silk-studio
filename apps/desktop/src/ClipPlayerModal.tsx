@@ -1,5 +1,7 @@
+import { SHORTCUTS, resolveShortcuts, shortcutAction, shortcutTitle, type ShortcutBindings } from "./shortcuts";
 import { Icon } from "./Icon";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type { ClipEntry, ClipMarker } from "./types";
 import {
@@ -12,7 +14,12 @@ import {
 } from "./ipc";
 
 type ClipPlayerModalProps = {
+  autoFullscreen?: boolean;
+  shortcuts?: ShortcutBindings;
   clip: ClipEntry;
+  clips: ClipEntry[];
+  onSelectClip: (clip: ClipEntry) => void;
+  onShare: (clip: ClipEntry) => void;
   onClose: () => void;
   onRefreshLibrary: () => Promise<void>;
   onOpenExternal: (clip: ClipEntry) => Promise<void>;
@@ -44,12 +51,109 @@ type ManagedAudioTrack = {
   src?: string; // For additional audio tracks (trackId > 1)
 };
 
-export function ClipPlayerModal({
+// Keep presentation mounted while clip-specific playback/review state is replaced.
+// Navigating must not exit native fullscreen or reuse another clip's bookmarks/audio.
+export function ClipPlayerModal(props: ClipPlayerModalProps): JSX.Element {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const changingFullscreen = useRef(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isTheaterMode, setIsTheaterMode] = useState(false);
+  const [fullscreenError, setFullscreenError] = useState<string | null>(null);
+  const playableClips = props.clips.filter((clip) => !clip.missing);
+  const index = playableClips.findIndex((clip) => clip.path === props.clip.path);
+  const previous = index > 0 ? playableClips[index - 1] : undefined;
+  const next = index >= 0 ? playableClips[index + 1] : undefined;
+
+  const toggleFullscreen = useCallback(async () => {
+    if (changingFullscreen.current) return;
+    changingFullscreen.current = true;
+    setFullscreenError(null);
+    try {
+      if (isMockMode()) {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await rootRef.current?.requestFullscreen();
+        setIsFullscreen(document.fullscreenElement === rootRef.current);
+      } else {
+        await invoke("app_window_set_fullscreen", { fullscreen: !isFullscreen });
+        setIsFullscreen(!isFullscreen);
+      }
+    } catch {
+      setFullscreenError("Couldn't change fullscreen. Please try again.");
+    } finally {
+      changingFullscreen.current = false;
+    }
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    let mounted = true;
+    const checkFullscreen = async () => {
+      if (changingFullscreen.current) return;
+      try {
+        const fullscreen = isMockMode()
+          ? document.fullscreenElement === rootRef.current
+          : await invoke<boolean>("app_window_is_fullscreen");
+        if (mounted && !changingFullscreen.current) setIsFullscreen(fullscreen);
+      } catch { /* Native window may already be closing. */ }
+    };
+    const initial = setTimeout(() => {
+      if (props.autoFullscreen) void toggleFullscreen();
+      else void checkFullscreen();
+    }, 0);
+    window.addEventListener("resize", checkFullscreen);
+    document.addEventListener("fullscreenchange", checkFullscreen);
+    return () => {
+      mounted = false;
+      clearTimeout(initial);
+      window.removeEventListener("resize", checkFullscreen);
+      document.removeEventListener("fullscreenchange", checkFullscreen);
+      if (!isMockMode()) {
+        void invoke("app_window_set_fullscreen", { fullscreen: false }).catch(() => {});
+      }
+    };
+  }, []);
+
+  return createPortal(
+    <div ref={rootRef} className={`clip-player-root ${isFullscreen ? "is-fullscreen-root" : ""}`}>
+      <ClipPlayerContent
+        key={props.clip.path}
+        {...props}
+        isFullscreen={isFullscreen}
+        isTheaterMode={isTheaterMode && !isFullscreen}
+        onToggleTheater={() => setIsTheaterMode((value) => !value)}
+        onToggleFullscreen={toggleFullscreen}
+        onPrevious={previous ? () => props.onSelectClip(previous) : undefined}
+        onNext={next ? () => props.onSelectClip(next) : undefined}
+      />
+      {fullscreenError ? <div className="clip-fullscreen-error" role="alert">{fullscreenError}</div> : null}
+    </div>,
+    document.body,
+  );
+}
+
+type ClipPlayerContentProps = ClipPlayerModalProps & {
+  isFullscreen: boolean;
+  isTheaterMode: boolean;
+  onToggleTheater: () => void;
+  onToggleFullscreen: () => Promise<void>;
+  onPrevious?: () => void;
+  onNext?: () => void;
+};
+
+function ClipPlayerContent({
   clip,
+  shortcuts,
   onClose,
   onRefreshLibrary,
   onOpenExternal,
-}: ClipPlayerModalProps): JSX.Element {
+  onShare,
+  isFullscreen,
+  isTheaterMode,
+  onToggleTheater,
+  onToggleFullscreen: handleToggleFullscreen,
+  onPrevious,
+  onNext,
+}: ClipPlayerContentProps): JSX.Element {
+  const bindings = resolveShortcuts(shortcuts);
   const modalContainerRef = useRef<HTMLDivElement>(null);
   const videoStageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -65,14 +169,25 @@ export function ClipPlayerModal({
   const initialDuration = (clip.durationMs ?? 60000) / 1000;
   const [duration, setDuration] = useState<number>(initialDuration);
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
+  const [frameRate, setFrameRate] = useState(60);
   const [masterVolume, setMasterVolume] = useState<number>(1.0);
   const [isMasterMuted, setIsMasterMuted] = useState<boolean>(false);
   const [videoDecodeError, setVideoDecodeError] = useState<string | null>(null);
   const [switchedToH264, setSwitchedToH264] = useState<boolean>(false);
 
-  // Layout states: Theater Mode & Fullscreen
-  const [isTheaterMode, setIsTheaterMode] = useState<boolean>(false);
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const hideControlsTimer = useRef<ReturnType<typeof setTimeout>>();
+  const revealControls = useCallback(() => {
+    setControlsVisible(true);
+    clearTimeout(hideControlsTimer.current);
+    if (isFullscreen) {
+      hideControlsTimer.current = setTimeout(() => setControlsVisible(false), 2200);
+    }
+  }, [isFullscreen]);
+  useEffect(() => {
+    revealControls();
+    return () => clearTimeout(hideControlsTimer.current);
+  }, [revealControls]);
 
   // Multi-track audio mixer state (open by default when audio tracks exist)
   const [audioTracks, setAudioTracks] = useState<ManagedAudioTrack[]>([]);
@@ -104,7 +219,11 @@ export function ClipPlayerModal({
 
   // Initialize Video source, Keyframes, and Audio Tracks
   useEffect(() => {
+    let cancelled = false;
     if (!clip.missing && clip.path) {
+      if (!isMockMode()) void invoke<number>("get_clip_frame_rate", { path: clip.path }).then((fps) => {
+        if (!cancelled && Number.isFinite(fps) && fps > 0) setFrameRate(fps);
+      }).catch(() => {});
       try {
         const url = isMockMode() ? "" : convertFileSrc(clip.path);
         setVideoSrc(url);
@@ -114,12 +233,13 @@ export function ClipPlayerModal({
 
       // 1. Fetch keyframes
       void getClipKeyframes(clip.path)
-        .then((kfs) => setKeyframes(kfs))
+        .then((kfs) => { if (!cancelled) setKeyframes(kfs); })
         .catch(() => {});
 
       // 2. Fetch all discrete audio tracks
       void getClipAudioTracks(clip.path)
         .then(async (tracks) => {
+          if (cancelled) return;
           const mapped: ManagedAudioTrack[] = tracks.map((t) => ({
             trackId: t.trackId,
             name: t.name,
@@ -139,6 +259,7 @@ export function ClipPlayerModal({
             for (const t of secondaryTracks) {
               try {
                 const path = await extractClipAudioTrack(clip.path, t.trackId);
+                if (cancelled) return;
                 const srcUrl = convertFileSrc(path);
                 setAudioTracks((prev) =>
                   prev.map((item) => (item.trackId === t.trackId ? { ...item, src: srcUrl } : item))
@@ -151,10 +272,11 @@ export function ClipPlayerModal({
         })
         .catch(() => {});
     }
+    return () => { cancelled = true; };
   }, [clip.path, clip.missing]);
 
   // Immediate resource cleanup on unmount to prevent background decoding or network lag
-  useEffect(() => {
+  useLayoutEffect(() => {
     return () => {
       if (rafSeekIdRef.current) {
         cancelAnimationFrame(rafSeekIdRef.current);
@@ -176,61 +298,47 @@ export function ClipPlayerModal({
     };
   }, []);
 
-  // Listen for native window fullscreen changes
-  useEffect(() => {
-    let mounted = true;
-    const checkFs = async () => {
-      try {
-        const fs = await invoke<boolean>("app_window_is_fullscreen");
-        if (mounted) setIsFullscreen(fs);
-      } catch {
-        // ignore
-      }
-    };
-    void checkFs();
-
-    const handleResize = () => {
-      void checkFs();
-    };
-    window.addEventListener("resize", handleResize);
-
-    return () => {
-      mounted = false;
-      window.removeEventListener("resize", handleResize);
-      void invoke("app_window_set_fullscreen", { fullscreen: false }).catch(() => {});
-    };
-  }, []);
-
-  // Keyboard shortcuts (Space = Play/Pause, T = Theater, F = Fullscreen, M = Mute)
+  // Match saved chords exactly, including modifiers. Inputs retain text editing.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.isComposing || document.querySelector(".clip-share-dialog")) return;
       const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
-
-      if (e.code === "Space") {
-        e.preventDefault();
-        togglePlay();
-      } else if (e.code === "KeyT") {
-        e.preventDefault();
-        setIsTheaterMode((prev) => !prev);
-      } else if (e.code === "KeyF") {
-        e.preventDefault();
-        handleToggleFullscreen();
-      } else if (e.code === "KeyM") {
-        e.preventDefault();
-        toggleMute();
-      } else if (e.code === "ArrowLeft") {
-        e.preventDefault();
-        handleSeek(currentTime - 5);
-      } else if (e.code === "ArrowRight") {
-        e.preventDefault();
-        handleSeek(currentTime + 5);
+      const action = shortcutAction(e, bindings);
+      if (!action || action === "openSettings") return;
+      const editing = target.matches("input, textarea, select") || target.isContentEditable;
+      const bookmarkSubmit = action === "addBookmark" && target.matches(".vod-note-input") && e.code === "Enter";
+      if (editing && !bookmarkSubmit && !(action === "closePlayer" && e.code === "Escape")) return;
+      if ((e.code === "Space" || e.code === "Enter") && target.closest("button") && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) return;
+      e.preventDefault();
+      if (e.repeat && !action.startsWith("seek") && !["previousFrame", "nextFrame", "slower", "faster"].includes(action)) return;
+      switch (action) {
+        case "closePlayer": onClose(); break;
+        case "playPause": case "playPauseAlternate": togglePlay(); break;
+        case "theater": if (!isFullscreen) onToggleTheater(); break;
+        case "fullscreen": void handleToggleFullscreen(); break;
+        case "mute": toggleMute(); break;
+        case "seekBack5": handleSeek(currentTime - 5); break;
+        case "seekForward5": handleSeek(currentTime + 5); break;
+        case "seekBack10": handleSeek(currentTime - 10); break;
+        case "seekForward10": handleSeek(currentTime + 10); break;
+        case "slower": handleSpeedChange(Math.max(0.25, playbackRate - 0.25)); break;
+        case "faster": handleSpeedChange(Math.min(2, playbackRate + 0.25)); break;
+        case "previousFrame": case "nextFrame": {
+          videoRef.current?.pause();
+          Object.values(extraAudioElsRef.current).forEach((audio) => audio?.pause());
+          setIsPlaying(false);
+          handleSeek((videoRef.current?.currentTime ?? currentTime) + (action === "previousFrame" ? -1 : 1) / frameRate);
+          break;
+        }
+        case "previousClip": onPrevious?.(); break;
+        case "nextClip": onNext?.(); break;
+        case "addBookmark": handleAddMarker(); break;
+        default: if (/^jump[0-9]$/.test(action)) handleSeek(duration * Number(action.slice(-1)) / 10);
       }
     };
-
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [currentTime, isPlaying, audioTracks, masterVolume, isMasterMuted]);
+  }, [bindings, currentTime, isPlaying, audioTracks, masterVolume, isMasterMuted, isFullscreen, handleToggleFullscreen, onToggleTheater, onClose, onPrevious, onNext, frameRate, playbackRate, duration, markerLabel, markerNote, selectedColor, markers]);
 
   // Persist markers whenever updated
   useEffect(() => {
@@ -578,16 +686,7 @@ export function ClipPlayerModal({
     );
   };
 
-  // Native Tauri window fullscreen toggle
-  const handleToggleFullscreen = async () => {
-    try {
-      const nextFs = !isFullscreen;
-      await invoke("app_window_set_fullscreen", { fullscreen: nextFs });
-      setIsFullscreen(nextFs);
-    } catch (err) {
-      console.warn("Failed to toggle native fullscreen:", err);
-    }
-  };
+
 
   // VOD Marker handlers
   const handleAddMarker = () => {
@@ -683,6 +782,7 @@ export function ClipPlayerModal({
       onClick={onClose}
       role="dialog"
       aria-modal="true"
+      aria-label={`Clip player: ${clip.name}`}
     >
       <div
         ref={modalContainerRef}
@@ -713,11 +813,12 @@ export function ClipPlayerModal({
             </span>
           </div>
           <div className="clip-modal-actions">
+            <button type="button" className="button button-secondary button-small" onClick={() => { videoRef.current?.pause(); Object.values(extraAudioElsRef.current).forEach((el) => el?.pause()); setIsPlaying(false); onShare(clip); }}><Icon name="share" /> Share</button>
             <button
               type="button"
               className={`button button-small ${isTheaterMode ? "button-accent" : "button-secondary"}`}
-              onClick={() => setIsTheaterMode(!isTheaterMode)}
-              title="Toggle Theater Mode (T)"
+              onClick={onToggleTheater}
+              title={shortcutTitle("Toggle Theater Mode", "theater", bindings)}
             >
               {isTheaterMode ? "Standard View" : "Theater Mode"}
             </button>
@@ -747,13 +848,16 @@ export function ClipPlayerModal({
             {/* Direct Fullscreen Video Stage (Video, Scrub Bar, Controls) */}
             <div
               ref={videoStageRef}
-              className={`clip-video-stage ${isFullscreen ? "is-fullscreen-stage" : ""}`}
+              className={`clip-video-stage ${isFullscreen ? "is-fullscreen-stage" : ""} ${controlsVisible ? "controls-visible" : "controls-hidden"}`}
+              onPointerMove={revealControls}
+              onPointerDown={revealControls}
+              onFocusCapture={revealControls}
             >
               {/* Video Viewport */}
               <div
                 className={`clip-player-viewport ${isTheaterMode ? "is-theater-viewport" : ""}`}
                 onDoubleClick={handleToggleFullscreen}
-                title="Double-click to toggle fullscreen"
+                title={isFullscreen ? undefined : "Double-click to toggle fullscreen"}
               >
                 {videoSrc ? (
                   <video
@@ -824,8 +928,25 @@ export function ClipPlayerModal({
                   ▶
                 </button>
               ) : null}
+                {onPrevious ? (
+                  <div className="clip-edge-zone clip-edge-left">
+                    <button type="button" className="clip-edge-arrow" onClick={onPrevious}
+                      aria-label="Previous clip" title="Previous clip">
+                      <Icon name="chevronLeft" />
+                    </button>
+                  </div>
+                ) : null}
+                {onNext ? (
+                  <div className="clip-edge-zone clip-edge-right">
+                    <button type="button" className="clip-edge-arrow" onClick={onNext}
+                      aria-label="Next clip" title="Next clip">
+                      <Icon name="chevronRight" />
+                    </button>
+                  </div>
+                ) : null}
             </div>
 
+            <div className="clip-playback-chrome">
             {/* Timeline Scrub Bar with Keyframe Ticks & Markers */}
             <div className="clip-timeline-wrapper">
               <div
@@ -900,50 +1021,29 @@ export function ClipPlayerModal({
 
             {/* Playback Controls Bar */}
             <div className="clip-controls-bar">
-              <div className="clip-controls-left">
-                <button
-                  type="button"
-                  className="button button-small button-primary"
-                  onClick={togglePlay}
-                  aria-label={isPlaying ? "Pause" : "Play"}
-                >
+              <div className="rate-selector-group" aria-label="Playback speed">
+                {[0.5, 1.0, 1.5, 2.0].map((rate) => (
+                  <button key={rate} type="button"
+                    className={`chip-button ${playbackRate === rate ? "is-selected" : ""}`}
+                    onClick={() => handleSpeedChange(rate)}>{rate}x</button>
+                ))}
+              </div>
+              <div className="clip-transport-controls">
+                <button type="button" className="button button-small button-secondary"
+                  onClick={() => handleSeek(currentTime - 5)}
+                  title={shortcutTitle("Rewind 5s", "seekBack5", bindings)}>-5s</button>
+                <button type="button" className="button button-small button-primary"
+                  onClick={togglePlay} aria-label={isPlaying ? "Pause" : "Play"}>
                   {isPlaying ? "Pause" : "Play"}
                 </button>
-                <button
-                  type="button"
-                  className="button button-small button-secondary"
-                  onClick={() => handleSeek(currentTime - 5)}
-                  title="Rewind 5s (Left Arrow)"
-                >
-                  -5s
-                </button>
-                <button
-                  type="button"
-                  className="button button-small button-secondary"
+                <button type="button" className="button button-small button-secondary"
                   onClick={() => handleSeek(currentTime + 5)}
-                  title="Forward 5s (Right Arrow)"
-                >
-                  +5s
-                </button>
-
-                {/* Playback Rate */}
-                <div className="rate-selector-group">
-                  {[0.5, 1.0, 1.5, 2.0].map((rate) => (
-                    <button
-                      key={rate}
-                      type="button"
-                      className={`chip-button ${playbackRate === rate ? "is-selected" : ""}`}
-                      onClick={() => handleSpeedChange(rate)}
-                    >
-                      {rate}x
-                    </button>
-                  ))}
-                </div>
+                  title={shortcutTitle("Forward 5s", "seekForward5", bindings)}>+5s</button>
               </div>
 
               <div className="clip-controls-right">
                 {/* Audio Mixer Toggle */}
-                {audioTracks.length > 0 ? (
+                {!isFullscreen && audioTracks.length > 0 ? (
                   <button
                     type="button"
                     className={`button button-small ${mixerOpen ? "button-accent" : "button-secondary"}`}
@@ -959,7 +1059,7 @@ export function ClipPlayerModal({
                   type="button"
                   className="icon-button"
                   onClick={toggleMute}
-                  title={isMasterMuted ? "Unmute (M)" : "Mute (M)"}
+                  title={shortcutTitle(isMasterMuted ? "Unmute" : "Mute", "mute", bindings)}
                 >
                   <Icon name={isMasterMuted ? "mute" : "audio"} />
                 </button>
@@ -980,20 +1080,20 @@ export function ClipPlayerModal({
                 </div>
 
                 {/* Trimmer Toggle */}
-                <button
+                {!isFullscreen ? <button
                   type="button"
                   className={`button button-small ${trimActive ? "button-accent" : "button-secondary"}`}
                   onClick={() => setTrimActive(!trimActive)}
                 >
                   {trimActive ? "Close Trimmer" : "Trim Clip"}
-                </button>
+                </button> : null}
 
                 {/* Sleek Fullscreen Symbol Button */}
                 <button
                   type="button"
                   className="icon-button clip-fullscreen-symbol-btn"
                   onClick={handleToggleFullscreen}
-                  title={isFullscreen ? "Exit Fullscreen (F)" : "Fullscreen (F)"}
+                  title={shortcutTitle(isFullscreen ? "Exit Fullscreen" : "Fullscreen", "fullscreen", bindings)}
                   aria-label={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
                 >
                   <span aria-hidden="true" style={{ fontSize: "16px", lineHeight: 1 }}>
@@ -1002,6 +1102,7 @@ export function ClipPlayerModal({
                 </button>
               </div>
             </div>
+            </div> {/* End playback chrome */}
             </div> {/* End direct fullscreen video stage */}
 
             {/* Audio Mixer Studio Drawer (Displays all audio tracks playing together) */}
@@ -1216,6 +1317,11 @@ export function ClipPlayerModal({
                     aria-label={c.label}
                   />
                 ))}
+                <label className="marker-custom-color" title="Choose any bookmark color">
+                  <input type="color" aria-label="Custom bookmark color" value={selectedColor}
+                    onChange={(event) => setSelectedColor(event.target.value)} />
+                  <span>Custom</span>
+                </label>
               </div>
 
               <input
@@ -1224,9 +1330,6 @@ export function ClipPlayerModal({
                 placeholder="Marker title (e.g. 1v3 Clutch, Missed Smoke)..."
                 value={markerLabel}
                 onChange={(e) => setMarkerLabel(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleAddMarker();
-                }}
               />
 
               <input
@@ -1235,9 +1338,6 @@ export function ClipPlayerModal({
                 placeholder="Detailed review notes (optional)..."
                 value={markerNote}
                 onChange={(e) => setMarkerNote(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleAddMarker();
-                }}
               />
 
               <button
@@ -1254,11 +1354,10 @@ export function ClipPlayerModal({
               <div className="vod-marker-list">
                 {markers.map((m) => (
                   <div key={m.id} className="vod-marker-row">
-                    <span
-                      className="vod-marker-dot"
-                      style={{ backgroundColor: m.color }}
-                      aria-hidden="true"
-                    />
+                    <input type="color" className="vod-marker-color" value={m.color}
+                      aria-label={`Color for ${m.label}`} title="Change bookmark color"
+                      onChange={(event) => setMarkers((previous) => previous.map((marker) =>
+                        marker.id === m.id ? {...marker, color: event.target.value} : marker))} />
                     <button
                       type="button"
                       className="vod-marker-timestamp"
@@ -1288,6 +1387,13 @@ export function ClipPlayerModal({
                 No review markers yet. Play the video, choose a color, and click "+ Add Bookmark" to save timestamped feedback for your VOD reviews.
               </p>
             )}
+            <details className="clip-keyboard-help">
+              <summary>Keyboard shortcuts</summary>
+              <dl>{SHORTCUTS.filter(({id}) => id !== "openSettings" && bindings[id]).map(({id, label}) => (
+                <div key={id}><dt>{label}</dt><dd><kbd>{bindings[id]}</kbd></dd></div>
+              ))}</dl>
+              <p>Change these in Settings → Hotkeys.</p>
+            </details>
           </div>
         </div>
       </div>

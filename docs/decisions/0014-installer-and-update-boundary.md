@@ -2,6 +2,9 @@
 
 **Status:** Accepted for S9 release preparation
 
+The updater deferral below is superseded by ADR 0035. The per-user installer
+and Windows publisher-signing requirements remain in effect.
+
 ## Context
 
 Silk is a Windows-first local application. The installer must not require

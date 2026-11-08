@@ -263,6 +263,9 @@ pub struct HotkeysSettings {
     pub save_replay: String,
     pub start_capture: Option<String>,
     pub stop_capture: Option<String>,
+    /// Missing entries inherit the shared defaults; null explicitly disables an action.
+    #[serde(default)]
+    pub shortcuts: std::collections::BTreeMap<String, Option<String>>,
 }
 
 impl Default for HotkeysSettings {
@@ -271,6 +274,7 @@ impl Default for HotkeysSettings {
             save_replay: DEFAULT_SAVE_HOTKEY.to_string(),
             start_capture: None,
             stop_capture: None,
+            shortcuts: Default::default(),
         }
     }
 }
@@ -323,16 +327,43 @@ pub enum Theme {
 #[allow(dead_code)]
 pub type AppTheme = Theme;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct ThemeColors {
+    pub main: Option<String>,
+    pub background: Option<String>,
+    pub text: Option<String>,
+    pub subtext: Option<String>,
+    pub capture: Option<String>,
+    pub replay_buffer: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ApplicationSettings {
+    #[serde(default = "default_check_for_updates")]
+    pub check_for_updates: bool,
     pub start_with_windows: bool,
     pub minimize_to_tray: bool,
     pub notifications_enabled: bool,
     #[serde(default = "default_clip_sound_enabled")]
     pub clip_sound_enabled: bool,
+    #[serde(default = "default_clip_sound_volume")]
+    pub clip_sound_volume: u16,
     #[serde(default)]
     pub theme: Theme,
+    #[serde(default)]
+    pub open_clips_fullscreen: bool,
+    #[serde(default)]
+    pub colors: ThemeColors,
+}
+
+fn default_clip_sound_volume() -> u16 {
+    100
+}
+
+fn default_check_for_updates() -> bool {
+    true
 }
 
 fn default_clip_sound_enabled() -> bool {
@@ -342,11 +373,15 @@ fn default_clip_sound_enabled() -> bool {
 impl Default for ApplicationSettings {
     fn default() -> Self {
         Self {
+            check_for_updates: true,
             start_with_windows: false,
             minimize_to_tray: true,
             notifications_enabled: true,
             clip_sound_enabled: true,
+            clip_sound_volume: 100,
             theme: Theme::Studio,
+            open_clips_fullscreen: false,
+            colors: ThemeColors::default(),
         }
     }
 }

@@ -11,6 +11,34 @@ const MAX_VIDEO_BITRATE_KBPS: u32 = 100_000;
 /// Validate every setting; returns all violations (empty when valid).
 pub fn validate_settings(config: &AppConfig) -> Vec<FieldIssue> {
     let mut issues = Vec::new();
+    let colors = &config.application.colors;
+    for (key, value) in [
+        ("main", &colors.main),
+        ("background", &colors.background),
+        ("text", &colors.text),
+        ("subtext", &colors.subtext),
+        ("capture", &colors.capture),
+        ("replayBuffer", &colors.replay_buffer),
+    ] {
+        if let Some(value) = value {
+            if value.len() != 7
+                || !value.starts_with('#')
+                || !value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+            {
+                issues.push(FieldIssue {
+                    field: format!("application.colors.{key}"),
+                    reason: "must be a six-digit hex color (#RRGGBB)".into(),
+                });
+            }
+        }
+    }
+
+    if config.application.clip_sound_volume > 300 {
+        issues.push(FieldIssue {
+            field: "application.clipSoundVolume".into(),
+            reason: "must be within 0..=300 percent".into(),
+        });
+    }
 
     // Capture (VID-004/005)
     if !matches!(config.capture.frame_rate, 30 | 60 | 120) {
@@ -174,12 +202,6 @@ pub fn validate_settings(config: &AppConfig) -> Vec<FieldIssue> {
         "output.fileNamePattern",
         &mut issues,
     );
-    if config.output.container != crate::ContainerFormat::Mp4 {
-        issues.push(FieldIssue {
-            field: "output.container".to_string(),
-            reason: "only 'mp4' is supported for direct recordings".to_string(),
-        });
-    }
 
     // Hotkeys (KEY-001)
     validate_chord(
@@ -262,6 +284,37 @@ fn validate_duplicate_chords(config: &AppConfig, issues: &mut Vec<FieldIssue>) {
         if !seen.insert(normalized) {
             issues.push(FieldIssue {
                 field: field.to_string(),
+                reason: "duplicates another configured hotkey".to_string(),
+            });
+        }
+    }
+    let global_chords = seen.clone();
+    let definitions = crate::shortcuts::definitions();
+    for id in config.hotkeys.shortcuts.keys() {
+        if !definitions.iter().any(|definition| &definition.id == id) {
+            issues.push(FieldIssue {
+                field: format!("hotkeys.shortcuts.{id}"),
+                reason: "unknown shortcut action".to_string(),
+            });
+        }
+    }
+    for definition in definitions {
+        let override_value = config.hotkeys.shortcuts.get(&definition.id);
+        let raw = override_value.unwrap_or(&definition.default).as_deref();
+        let field = format!("hotkeys.shortcuts.{}", definition.id);
+        validate_chord(raw, &field, issues);
+        let Some(raw) = raw else { continue };
+        let Ok(normalized) = normalize_chord(raw) else {
+            continue;
+        };
+        // Keep existing global bindings valid when upgrading an older configuration.
+        // The UI suppresses an inherited local default if a global hotkey owns it.
+        if override_value.is_none() && global_chords.contains(&normalized) {
+            continue;
+        }
+        if !seen.insert(normalized) {
+            issues.push(FieldIssue {
+                field,
                 reason: "duplicates another configured hotkey".to_string(),
             });
         }
@@ -746,6 +799,56 @@ mod tests {
     }
 
     #[test]
+    fn custom_colors_and_fullscreen_survive_roundtrip() {
+        let mut config = base();
+        config.application.open_clips_fullscreen = true;
+        config.application.colors.main = Some("#12aBcF".into());
+        config.application.colors.background = Some("#090a10".into());
+        config.application.colors.capture = Some("#ff9900".into());
+        assert!(validate_settings(&config).is_empty());
+        let restored: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.application, config.application);
+        for bad in ["red", "#fff", "#12345g", "url(file)", "#12345678"] {
+            config.application.colors.main = Some(bad.into());
+            assert!(validate_settings(&config)
+                .iter()
+                .any(|issue| issue.field == "application.colors.main"));
+        }
+    }
+
+    #[test]
+    fn old_application_settings_default_new_options_without_losing_existing_values() {
+        let mut json = serde_json::to_value(crate::ApplicationSettings::default()).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("colors");
+        object.remove("openClipsFullscreen");
+        object.remove("clipSoundVolume");
+        object.insert("theme".into(), "vamp".into());
+        let restored: crate::ApplicationSettings = serde_json::from_value(json).unwrap();
+        assert!(!restored.open_clips_fullscreen);
+        assert_eq!(restored.clip_sound_volume, 100);
+        assert_eq!(restored.colors, crate::ThemeColors::default());
+        assert_eq!(restored.theme, crate::Theme::Vamp);
+    }
+
+    #[test]
+    fn chime_volume_bounds_and_roundtrip() {
+        let mut config = base();
+        for volume in [0, 25, 100, 200, 300] {
+            config.application.clip_sound_volume = volume;
+            assert!(validate_settings(&config).is_empty());
+            let json = serde_json::to_string(&config).unwrap();
+            let restored: crate::AppConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.application.clip_sound_volume, volume);
+        }
+        config.application.clip_sound_volume = 301;
+        assert!(validate_settings(&config)
+            .iter()
+            .any(|issue| issue.field == "application.clipSoundVolume"));
+    }
+
+    #[test]
     fn application_settings_round_trip_serialization() {
         let app = crate::ApplicationSettings {
             start_with_windows: true,
@@ -753,13 +856,11 @@ mod tests {
             notifications_enabled: false,
             clip_sound_enabled: false,
             theme: crate::model::Theme::Ember,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&app).expect("application settings serialize");
-        assert_eq!(
-            json,
-            r#"{"startWithWindows":true,"minimizeToTray":false,"notificationsEnabled":false,"clipSoundEnabled":false,"theme":"ember"}"#
-        );
+        assert!(json.contains("\"openClipsFullscreen\":false"));
 
         let deserialized: crate::ApplicationSettings =
             serde_json::from_str(&json).expect("application settings deserialize");

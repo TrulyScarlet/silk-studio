@@ -14,6 +14,39 @@ use media_types::VideoSourceInfo;
 
 const DXGI_ERROR_NOT_FOUND: HRESULT = HRESULT(0x887A0002u32 as i32);
 
+/// Top visible application covering the captured display's center, in Z order.
+/// This is display attribution, not a promise of isolated process capture.
+pub fn capture_target_window(source_id: &str) -> Option<(media_types::WindowSourceInfo, bool)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic};
+    let (output, _) = resolve_source(source_id).ok()?;
+    let display = unsafe { output.GetDesc().ok()? }.DesktopCoordinates;
+    let center = (
+        (display.left + display.right) / 2,
+        (display.top + display.bottom) / 2,
+    );
+    for window in enumerate_windows().ok()? {
+        let handle = window.id.strip_prefix("hwnd:")?.parse::<usize>().ok()?;
+        let hwnd = HWND(handle as *mut _);
+        let mut bounds = RECT::default();
+        if unsafe { IsIconic(hwnd).as_bool() || GetWindowRect(hwnd, &mut bounds).is_err() } {
+            continue;
+        }
+        if bounds.left <= center.0
+            && bounds.right > center.0
+            && bounds.top <= center.1
+            && bounds.bottom > center.1
+        {
+            let fullscreen = (bounds.left - display.left).abs() <= 8
+                && (bounds.top - display.top).abs() <= 8
+                && (bounds.right - display.right).abs() <= 8
+                && (bounds.bottom - display.bottom).abs() <= 8;
+            return Some((window, fullscreen));
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphicsAdapterInfo {
     pub name: String,

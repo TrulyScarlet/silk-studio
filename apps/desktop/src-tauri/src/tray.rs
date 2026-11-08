@@ -69,6 +69,7 @@ pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &Window
     }
     let state = window.app_handle().state::<shell::ShellState>();
     if state.close_action() != CloseAction::Hide {
+        crate::theme_icon::cleanup_theme_icon(window.app_handle());
         return;
     }
 

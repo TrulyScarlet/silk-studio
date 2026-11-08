@@ -12,6 +12,8 @@ tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-dialog = { workspace = true }
 tauri-plugin-notification = { workspace = true }
 tauri-plugin-opener = { workspace = true }
+tauri-plugin-updater = { version = "=2.14.1", default-features = false, features = ["native-tls", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "system-proxy"] }
 
 app-controller = { workspace = true }
 configuration = { workspace = true }
@@ -20,6 +22,8 @@ diagnostics = { workspace = true }
 capture-api = { workspace = true }
 capture-windows = { workspace = true }
 clip-library = { workspace = true }
+clip-export = { workspace = true }
+encoder-ffmpeg = { workspace = true }
 encoder-api = { workspace = true }
 encoder-media-foundation = { workspace = true }
 hotkeys = { workspace = true }
@@ -34,8 +38,10 @@ sha2 = { workspace = true }
 test-support = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_Storage_EnhancedStorage", "Win32_Storage_FileSystem"] }
 audio-wasapi = { workspace = true }
 windows-sys = { workspace = true }
 
 [features]
 default = []
+updater-test-server = []

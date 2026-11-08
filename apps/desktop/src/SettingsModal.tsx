@@ -1,3 +1,7 @@
+import { invoke } from "@tauri-apps/api/core";
+import { UpdateSettings } from "./AppUpdates";
+import { SHORTCUTS, eventChord, resolveShortcuts, shortcutConflicts } from "./shortcuts";
+import { COLOR_FIELDS, colorVariables, defaultColors } from "./themeColors";
 import { Icon } from "./Icon";
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
@@ -57,7 +61,7 @@ const MIN_VIDEO_BITRATE_KBPS = 2_500;
 const MAX_VIDEO_BITRATE_KBPS = 100_000;
 const DEFAULT_CUSTOM_BITRATE_MBPS = 45;
 // Keep the settings UI aligned with the release gates in src-tauri/src/hud.rs and main.rs.
-const HUD_AVAILABLE = false;
+const HUD_AVAILABLE = true;
 const WINDOWS_NOTIFICATIONS_AVAILABLE = false;
 
 function ThemePreview({ theme }: { theme: AppSettings["application"]["theme"] }) {
@@ -240,34 +244,11 @@ function getCodecPolicyStatus(
   };
 }
 
-function parseKeyboardEventToKeyToken(event: React.KeyboardEvent): string | null {
-  const code = event.code;
-  const key = event.key;
-
-  if (/^F([1-9]|1[0-9]|2[0-4])$/i.test(code)) return code.toUpperCase();
-  if (/^F([1-9]|1[0-9]|2[0-4])$/i.test(key)) return key.toUpperCase();
-  if (code.startsWith("Key") && code.length === 4) return code.slice(3).toUpperCase();
-  if (code.startsWith("Digit") && code.length === 6) return code.slice(5);
-  if (code.startsWith("Numpad") && /^Numpad[0-9]$/.test(code)) return code.slice(6);
-
-  if (code === "ArrowUp" || key === "ArrowUp") return "UP";
-  if (code === "ArrowDown" || key === "ArrowDown") return "DOWN";
-  if (code === "ArrowLeft" || key === "ArrowLeft") return "LEFT";
-  if (code === "ArrowRight" || key === "ArrowRight") return "RIGHT";
-
-  if (code === "Space" || key === " " || key === "Spacebar") return "SPACE";
-  if (code === "Tab" || key === "Tab") return "TAB";
-  if (code === "Enter" || key === "Enter") return "ENTER";
-
-  if (key.length === 1 && /^[a-zA-Z0-9]$/.test(key)) return key.toUpperCase();
-  return null;
-}
-
 type HotkeyRecorderProps = {
   label: string;
   sublabel?: string;
   value: string | null;
-  defaultValue?: string;
+  defaultValue?: string | null;
   allowClear?: boolean;
   disabled?: boolean;
   onChange: (value: string | null) => void;
@@ -296,12 +277,6 @@ function HotkeyRecorder({
     event.preventDefault();
     event.stopPropagation();
 
-    if (event.key === "Escape") {
-      setIsRecording(false);
-      setHeldModifiers([]);
-      return;
-    }
-
     const isMod =
       event.key === "Control" ||
       event.key === "Shift" ||
@@ -318,17 +293,9 @@ function HotkeyRecorder({
       return;
     }
 
-    const keyToken = parseKeyboardEventToKeyToken(event);
-    if (!keyToken) return;
-
-    const parts: string[] = [];
-    if (event.ctrlKey) parts.push("Ctrl");
-    if (event.altKey) parts.push("Alt");
-    if (event.shiftKey) parts.push("Shift");
-    if (event.metaKey) parts.push("Win");
-    parts.push(keyToken);
-
-    onChange(parts.join("+"));
+    const chord = eventChord(event);
+    if (!chord) return;
+    onChange(chord);
     setIsRecording(false);
     setHeldModifiers([]);
   }
@@ -393,7 +360,7 @@ function HotkeyRecorder({
                 </span>
               ) : (
                 <span className="recording-prompt-text">
-                  Press keys on keyboard... (Esc to cancel)
+                  Press a key or combination...
                 </span>
               )}
             </span>
@@ -411,6 +378,11 @@ function HotkeyRecorder({
           )}
         </button>
 
+        {isRecording && (
+          <button type="button" className="button button-quiet compact-button" onClick={() => setIsRecording(false)}>
+            Cancel
+          </button>
+        )}
         {allowClear && value ? (
           <button
             type="button"
@@ -423,13 +395,13 @@ function HotkeyRecorder({
           </button>
         ) : null}
 
-        {defaultValue && value !== defaultValue ? (
+        {defaultValue !== undefined && value !== defaultValue ? (
           <button
             type="button"
             className="button button-quiet compact-button hotkey-action-btn"
             onClick={() => onChange(defaultValue)}
             disabled={disabled || isRecording}
-            title={`Reset to default (${defaultValue})`}
+            title={`Reset to default (${defaultValue ?? "Unassigned"})`}
           >
             Reset default
           </button>
@@ -551,10 +523,12 @@ function getTrackDeviceValue(track: AudioTrackSettings): string {
 
 export type SettingsTabId =
   | "capture"
+  | "hotkeys"
   | "video"
   | "audio"
   | "storage"
   | "hud"
+  | "system"
   | "theme"
   | "diagnostics";
 
@@ -583,6 +557,7 @@ export type SettingsModalProps = {
   refreshWindowSources: () => Promise<void> | void;
   refreshDisplaySources: () => Promise<void> | void;
   diagnosticInfo: DiagnosticBuildInfo | null;
+  activityLog: string[];
   diagnosticMessage: string;
   diagnosticBusy: boolean;
   createDiagnosticPackage: () => Promise<void> | void;
@@ -615,6 +590,7 @@ export function SettingsModal({
   refreshWindowSources,
   refreshDisplaySources,
   diagnosticInfo,
+  activityLog,
   diagnosticMessage,
   diagnosticBusy,
   createDiagnosticPackage,
@@ -622,6 +598,8 @@ export function SettingsModal({
   storageSummary,
 }: SettingsModalProps): JSX.Element | null {
   const [activeTab, setActiveTab] = useState<SettingsTabId>("capture");
+  const [chimeBusy, setChimeBusy] = useState(false);
+  const [chimeMessage, setChimeMessage] = useState("");
   const modalRef = useRef<HTMLDivElement>(null);
 
   // Close on Escape key
@@ -641,7 +619,10 @@ export function SettingsModal({
     return null;
   }
 
+  const conflicts = shortcutConflicts(draft.hotkeys);
+  const bindings = resolveShortcuts(draft.hotkeys.shortcuts, draft.hotkeys);
   const isSettingsDirty = settings ? JSON.stringify(draft) !== JSON.stringify(settings) : false;
+  const overlayNeedsSave = !settings || JSON.stringify(draft.overlay) !== JSON.stringify(settings.overlay);
 
   const estimatedClipBytes = (() => {
     const videoBitrateKbps = draft.encoding.videoBitrateKbps ?? 45_000;
@@ -815,7 +796,7 @@ export function SettingsModal({
         </div>
 
         {/* Modal Main Body (Sidebar Tabs + Content Area) */}
-        <form onSubmit={(e) => void onSave(e)} className="settings-modal-form">
+        <form onSubmit={(e) => { if (conflicts.length) { e.preventDefault(); setActiveTab("hotkeys"); } else void onSave(e); }} className="settings-modal-form">
           <div className="settings-modal-body">
             {/* Left Nav Tabs */}
             <nav className="settings-nav-sidebar" aria-label="Settings categories">
@@ -825,7 +806,12 @@ export function SettingsModal({
                 onClick={() => setActiveTab("capture")}
               >
                 <span className="tab-icon" aria-hidden="true"><Icon name="game" /></span>
-                <span className="tab-label">Capture & Hotkeys</span>
+                <span className="tab-label">Capture</span>
+              </button>
+
+              <button type="button" className={`settings-tab-btn ${activeTab === "hotkeys" ? "is-active" : ""}`} onClick={() => setActiveTab("hotkeys")}>
+                <span className="tab-icon" aria-hidden="true"><Icon name="keyboard" /></span>
+                <span className="tab-label">Hotkeys</span>
               </button>
 
               <button
@@ -871,9 +857,10 @@ export function SettingsModal({
                 onClick={() => setActiveTab("theme")}
               >
                 <span className="tab-icon" aria-hidden="true"><Icon name="palette" /></span>
-                <span className="tab-label">Theme & App</span>
+                <span className="tab-label">Themes</span>
               </button>
 
+              <button type="button" className={`settings-tab-btn ${activeTab === "system" ? "is-active" : ""}`} onClick={() => setActiveTab("system")}><Icon name="settings" /><span className="tab-label">System</span></button>
               <button
                 type="button"
                 className={`settings-tab-btn ${activeTab === "diagnostics" ? "is-active" : ""}`}
@@ -1148,9 +1135,14 @@ export function SettingsModal({
                     </div>
                   </div>
 
-                  <div className="pane-section-header" style={{ marginTop: "24px" }}>
+                </div>
+              )}
+
+              {activeTab === "hotkeys" && (
+                <div className="settings-pane-section">
+                  <div className="pane-section-header">
                     <h3>Global Hotkeys</h3>
-                    <p>Click any hotkey below and press your desired keyboard combination.</p>
+                    <p>Recording shortcuts work even while you’re in a game. Click a binding, then press a key or combination.</p>
                   </div>
 
                   <div className="settings-group-card">
@@ -1197,6 +1189,23 @@ export function SettingsModal({
                       }
                     />
                   </div>
+                  {conflicts.length > 0 && <div className="shortcut-conflicts" role="alert">{conflicts.map((message) => <p key={message}>{message}</p>)}</div>}
+                  {["Application", "Clip player", "Jump through clip"].map((group) => (
+                    <section key={group} className="shortcut-section">
+                      <div className="pane-section-header">
+                        <h3>{group}</h3>
+                        <p>{group === "Application" ? "Available while Silk is focused." : "Available while a clip is open. Text fields keep their normal typing controls."}</p>
+                      </div>
+                      <div className="settings-group-card">
+                        {SHORTCUTS.filter((shortcut) => shortcut.group === group).map((shortcut) => (
+                          <HotkeyRecorder key={shortcut.id} label={shortcut.label}
+                            value={bindings[shortcut.id]} defaultValue={shortcut.default} allowClear disabled={settingsBusy}
+                            onChange={(value) => updateDraft((current) => ({...current, hotkeys: {...current.hotkeys,
+                              shortcuts: {...current.hotkeys.shortcuts, [shortcut.id]: value}}}))} />
+                        ))}
+                      </div>
+                    </section>
+                  ))}
                 </div>
               )}
 
@@ -1895,7 +1904,7 @@ export function SettingsModal({
                 <div className="settings-pane-section">
                   <div className="pane-section-header">
                     <h3>Native Capture HUD</h3>
-                    <p>Visual confirmation is suspended until it passes in-game frame-pacing tests.</p>
+                    <p>A brief confirmation when your replay is saved.</p>
                   </div>
 
                   <div className="settings-group-card">
@@ -1912,11 +1921,11 @@ export function SettingsModal({
                             },
                           }))
                         }
-                        disabled
+                        disabled={settingsBusy}
                       />
                       <span>
-                        Show capture confirmation HUD (currently unavailable)
-                        <small>The native HUD caused stutter in testing. Silk will not show it during gameplay, even if it was previously enabled.</small>
+                        Show capture confirmation HUD
+                        <small>Appears without taking focus and hides between clips.</small>
                       </span>
                     </label>
 
@@ -2156,11 +2165,12 @@ export function SettingsModal({
                           type="button"
                           className="button button-secondary overlay-test-btn"
                           onClick={() => void onTestOverlay()}
-                          disabled={settingsBusy || testOverlayBusy || !HUD_AVAILABLE || !draft.overlay.enabled}
+                          disabled={settingsBusy || testOverlayBusy || !HUD_AVAILABLE || !draft.overlay.enabled || overlayNeedsSave}
                           title="Display a preview of the native HUD on your screen"
                         >
                           <span>{testOverlayBusy ? "Triggering HUD..." : "Test notification"}</span>
                         </button>
+                        {overlayNeedsSave && <span className="field-hint">Save HUD changes before testing.</span>}
                         {testOverlayMessage ? (
                           <span className="form-status overlay-test-status" role="status" aria-live="polite">
                             {testOverlayMessage}
@@ -2194,9 +2204,50 @@ export function SettingsModal({
                       />
                       <span>
                         Play auditory chime when clip is saved
-                        <small>Confirmation without opening a game overlay</small>
+                        <small>Adjust the chime independently of your recording audio</small>
                       </span>
                     </label>
+
+                    <div className="chime-volume-control">
+                      <label htmlFor="clip-chime-volume">Chime volume</label>
+                      <output htmlFor="clip-chime-volume">{draft.application.clipSoundVolume}%</output>
+                      <input
+                        id="clip-chime-volume"
+                        type="range"
+                        min={0}
+                        max={300}
+                        step={5}
+                        value={draft.application.clipSoundVolume}
+                        aria-valuetext={`${draft.application.clipSoundVolume} percent`}
+                        disabled={settingsBusy || !draft.application.clipSoundEnabled}
+                        onChange={(event) => {
+                          const volume = Number(event.target.value);
+                          setChimeMessage("");
+                          updateDraft((current) => ({ ...current, application: {
+                            ...current.application, clipSoundVolume: volume,
+                          } }));
+                        }}
+                      />
+                      <span className="field-hint">0% is silent · 100% is the original level · 300% boosts the chime</span>
+                      <button
+                        type="button"
+                        className="button button-secondary"
+                        disabled={settingsBusy || chimeBusy || !draft.application.clipSoundEnabled || draft.application.clipSoundVolume === 0}
+                        onClick={async () => {
+                          setChimeBusy(true);
+                          setChimeMessage("");
+                          try {
+                            await invoke("test_clip_sound", { volume: draft.application.clipSoundVolume });
+                            setChimeMessage("Chime requested at this volume. Save changes to keep it.");
+                          } catch (error) {
+                            setChimeMessage(`Could not play chime: ${String(error)}`);
+                          } finally {
+                            setChimeBusy(false);
+                          }
+                        }}
+                      >Test chime</button>
+                      {chimeMessage && <span role="status" className="field-hint">{chimeMessage}</span>}
+                    </div>
 
                     <label className="check-row">
                       <input
@@ -2342,12 +2393,44 @@ export function SettingsModal({
                     </div>
                   </div>
 
-                  <div className="pane-section-header" style={{ marginTop: "24px" }}>
+                  <div className="pane-section-header"><h3>Custom colors</h3><p>Override the selected theme. Changes apply when you save.</p></div>
+                  <div className="settings-group-card">
+                    <div className="custom-color-grid">
+                      {COLOR_FIELDS.map(([key, label]) => (
+                        <label className="custom-color-field" key={key}>
+                          <span>{label}</span>
+                          <input type="color" aria-label={label} disabled={settingsBusy}
+                            value={draft.application.colors?.[key] ?? defaultColors(draft.application.theme)[key] ?? "#000000"}
+                            onChange={(event) => updateDraft((current) => ({...current, application: {...current.application, colors: {...current.application.colors, [key]: event.target.value}}}))} />
+                          <button type="button" className="button button-small button-secondary" disabled={settingsBusy || !draft.application.colors?.[key]}
+                            onClick={() => updateDraft((current) => ({...current, application: {...current.application, colors: {...current.application.colors, [key]: null}}}))}>Reset</button>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="custom-theme-preview" data-theme={draft.application.theme} style={colorVariables(draft.application.colors)}>
+                      <strong>Silk</strong><span className="custom-preview-capture">● Capture ready</span>
+                      <p>Your clips, your colors.</p><small>Replay buffer</small><div className="theme-preview-progress"><span /></div>
+                      <span className="theme-preview-action">Save replay</span>
+                    </div>
+                    <button type="button" className="button button-small button-secondary" disabled={settingsBusy}
+                      onClick={() => updateDraft((current) => ({...current, application: {...current.application, colors: {}}}))}>Reset all colors</button>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "system" && (<div className="settings-pane-section">
+                  <div className="pane-section-header">
                     <h3>System Behavior</h3>
-                    <p>Windows startup and system tray integration.</p>
+                    <p>Clip playback, Windows startup, updates, and system tray behavior.</p>
                   </div>
 
-                  <div className="settings-group-card">
+                  <div className="settings-group-card system-settings-card">
+                  <label className="check-row">
+                    <input type="checkbox" checked={draft.application.openClipsFullscreen ?? false} disabled={settingsBusy}
+                      onChange={(event) => updateDraft((current) => ({...current, application: {...current.application, openClipsFullscreen: event.target.checked}}))} />
+                    <span>Open clips in fullscreen<small>Click a clip to view it fullscreen automatically.</small></span>
+                  </label>
+
                     <label className="check-row">
                       <input
                         type="checkbox"
@@ -2386,9 +2469,14 @@ export function SettingsModal({
                       />
                       <span>Start Silk automatically when Windows logs in</span>
                     </label>
+                    <label className="check-row">
+                      <input type="checkbox" checked={draft.application.checkForUpdates ?? true} disabled={settingsBusy}
+                        onChange={(event) => updateDraft((current) => ({...current, application: {...current.application, checkForUpdates: event.target.checked}}))} />
+                      <span>Check for updates automatically<small>Check GitHub on launch and every four hours. Downloads and restarts only happen when you choose to update.</small></span>
+                    </label>
                   </div>
-                </div>
-              )}
+                  <UpdateSettings />
+              </div>)}
 
               {/* TAB 7: DIAGNOSTICS */}
               {activeTab === "diagnostics" && (
@@ -2397,6 +2485,15 @@ export function SettingsModal({
                     <h3>Diagnostic Logs & Hardware Probe</h3>
                     <p>Inspect detected graphics cards, hardware encoders, and export logs.</p>
                   </div>
+
+                  <details className="activity-panel diagnostic-activity" open>
+                    <summary>Recent activity log <span>{activityLog.length}</span></summary>
+                    {activityLog.length === 0 ? (
+                      <p className="empty-copy">Controller events will appear here.</p>
+                    ) : (
+                      <ol>{activityLog.map((line, index) => <li key={`${line}-${index}`}>{line}</li>)}</ol>
+                    )}
+                  </details>
 
                   <div className="settings-group-card">
                     <label className="field">
@@ -2485,6 +2582,7 @@ export function SettingsModal({
           {/* Modal Sticky Footer */}
           <div className="settings-modal-footer">
             <div className="settings-footer-left">
+              {conflicts.length > 0 && <button type="button" className="button button-quiet compact-button" onClick={() => setActiveTab("hotkeys")}>Resolve hotkey conflicts before saving</button>}
               {onDiscardChanges && isSettingsDirty && (
                 <button
                   type="button"
@@ -2514,7 +2612,7 @@ export function SettingsModal({
               <button
                 type="submit"
                 className="button button-primary settings-save-btn"
-                disabled={settingsBusy || directoryBusy}
+                disabled={settingsBusy || directoryBusy || conflicts.length > 0}
               >
                 {settingsBusy ? "Saving Settings..." : "Save Settings"}
               </button>

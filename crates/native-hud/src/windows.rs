@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, Interface, BOOL, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN,
     D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F,
@@ -33,7 +33,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionAnimation, IDCompositionDevice,
-    IDCompositionEffectGroup, IDCompositionTarget, IDCompositionVisual,
+    IDCompositionEffectGroup, IDCompositionSurface, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteInlineObject, IDWriteTextFormat,
@@ -43,13 +43,9 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
 };
-use windows::Win32::Graphics::Dxgi::{
-    IDXGIAdapter, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT,
-    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT,
-};
+use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, MonitorFromWindow, MONITORINFO,
     MONITOR_DEFAULTTOPRIMARY, PAINTSTRUCT,
@@ -863,7 +859,7 @@ impl Drop for NativeHud {
 struct HudThreadContext {
     hwnd: HWND,
     cmd_rx: Receiver<HudCommand>,
-    _dpi: u32,
+    dpi: u32,
     reduced_motion: bool,
     mode: HudMode,
     anchor: HudAnchor,
@@ -874,7 +870,7 @@ struct HudThreadContext {
     dcomp_visual: IDCompositionVisual,
     dcomp_effect_group: IDCompositionEffectGroup,
     // Direct2D & DXGI
-    swapchain: IDXGISwapChain1,
+    surface: IDCompositionSurface,
     d2d_context: ID2D1DeviceContext,
     _dwrite_factory: IDWriteFactory,
     title_format: IDWriteTextFormat,
@@ -884,6 +880,8 @@ struct HudThreadContext {
     // State
     _current_generation: u64,
     is_visible: bool,
+    hold_deadline: Option<Instant>,
+    exit_deadline: Option<Instant>,
     root_attached: bool,
     window_shown: bool,
 }
@@ -1041,7 +1039,7 @@ impl HudThreadContext {
             }
         };
 
-        // 2. DXGI swapchain for composition
+        // 2. Shared graphics device for a retained composition surface
         let dxgi_device: IDXGIDevice = match d3d_device.cast() {
             Ok(d) => d,
             Err(e) => {
@@ -1049,47 +1047,6 @@ impl HudThreadContext {
                 return Err(HudError::DeviceCreationFailed(e.to_string()));
             }
         };
-        let dxgi_adapter: IDXGIAdapter = match dxgi_device.GetAdapter() {
-            Ok(a) => a,
-            Err(e) => {
-                let _ = DestroyWindow(hwnd);
-                return Err(HudError::DeviceCreationFailed(e.to_string()));
-            }
-        };
-        let dxgi_factory: IDXGIFactory2 = match dxgi_adapter.GetParent() {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = DestroyWindow(hwnd);
-                return Err(HudError::DeviceCreationFailed(e.to_string()));
-            }
-        };
-
-        let swapchain_desc = DXGI_SWAP_CHAIN_DESC1 {
-            Width: phys_w,
-            Height: phys_h,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            Stereo: BOOL(0),
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            BufferCount: 2,
-            Scaling: DXGI_SCALING_STRETCH,
-            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-            Flags: 0,
-        };
-
-        let swapchain =
-            match dxgi_factory.CreateSwapChainForComposition(&d3d_device, &swapchain_desc, None) {
-                Ok(sc) => sc,
-                Err(e) => {
-                    let _ = DestroyWindow(hwnd);
-                    return Err(HudError::DeviceCreationFailed(e.to_string()));
-                }
-            };
-
         // 3. Direct2D Device Context & Target Bitmap
         let d2d_factory1: ID2D1Factory1 =
             match D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) {
@@ -1121,35 +1078,6 @@ impl HudThreadContext {
             }
         };
 
-        let dxgi_surface: IDXGISurface = match swapchain.GetBuffer(0) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = DestroyWindow(hwnd);
-                return Err(HudError::Direct2DFailed(e.to_string()));
-            }
-        };
-
-        let bitmap_props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: dpi as f32,
-            dpiY: dpi as f32,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            colorContext: ManuallyDrop::new(None),
-        };
-
-        let target_bitmap =
-            match d2d_context.CreateBitmapFromDxgiSurface(&dxgi_surface, Some(&bitmap_props)) {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = DestroyWindow(hwnd);
-                    return Err(HudError::Direct2DFailed(e.to_string()));
-                }
-            };
-
-        d2d_context.SetTarget(&target_bitmap);
         d2d_context.SetDpi(dpi as f32, dpi as f32);
         d2d_context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
@@ -1187,7 +1115,19 @@ impl HudThreadContext {
             }
         };
 
-        if let Err(e) = dcomp_visual.SetContent(&swapchain) {
+        let surface = match dcomp_device.CreateSurface(
+            phys_w,
+            phys_h,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_PREMULTIPLIED,
+        ) {
+            Ok(surface) => surface,
+            Err(e) => {
+                let _ = DestroyWindow(hwnd);
+                return Err(HudError::CompositionFailed(e.to_string()));
+            }
+        };
+        if let Err(e) = dcomp_visual.SetContent(&surface) {
             d2d_context.SetTarget(None);
             let _ = DestroyWindow(hwnd);
             return Err(HudError::CompositionFailed(e.to_string()));
@@ -1366,17 +1306,6 @@ impl HudThreadContext {
             let _ = compact_title_format.SetTrimming(&compact_trimming, sign);
         }
 
-        // Render initial transparent frame to backbuffer
-        d2d_context.BeginDraw();
-        d2d_context.Clear(Some(&D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        }));
-        let _ = d2d_context.EndDraw(None, None);
-        let _ = swapchain.Present(0, DXGI_PRESENT(0));
-
         // Show window if policy requires it to be shown while idle
         let mut window_shown = false;
         if matches!(
@@ -1394,10 +1323,10 @@ impl HudThreadContext {
             reduced_motion,
         };
 
-        let context = Self {
+        let mut context = Self {
             hwnd,
             cmd_rx,
-            _dpi: dpi,
+            dpi,
             reduced_motion,
             mode: config.mode,
             anchor: config.anchor,
@@ -1406,7 +1335,7 @@ impl HudThreadContext {
             dcomp_target,
             dcomp_visual,
             dcomp_effect_group,
-            swapchain,
+            surface,
             d2d_context,
             _dwrite_factory: dwrite_factory,
             title_format,
@@ -1415,10 +1344,22 @@ impl HudThreadContext {
             resources,
             _current_generation: 0,
             is_visible: false,
+            hold_deadline: None,
+            exit_deadline: None,
             root_attached,
             window_shown,
         };
 
+        // Warm the D2D drawing/text path at initialization, before the first
+        // gameplay save. Opacity is zero and the production HWND is hidden.
+        if let Err(error) = context.render_cue(&HudCue::saved(60_000, 12_345_678)) {
+            context.teardown();
+            return Err(error);
+        }
+        if let Err(error) = context.dcomp_device.Commit() {
+            context.teardown();
+            return Err(HudError::CompositionFailed(error.to_string()));
+        }
         Ok((context, capabilities, hwnd))
     }
 
@@ -1486,6 +1427,8 @@ impl HudThreadContext {
         let _ = KillTimer(Some(self.hwnd), TIMER_ID_HOLD);
         let _ = KillTimer(Some(self.hwnd), TIMER_ID_EXIT);
         self.is_visible = false;
+        self.hold_deadline = None;
+        self.exit_deadline = None;
         let _ = self.dcomp_effect_group.SetOpacity2(0.0);
         let _ = self.dcomp_visual.SetOffsetY2(0.0);
 
@@ -1505,17 +1448,18 @@ impl HudThreadContext {
     }
 
     unsafe fn drain_commands(&mut self) -> bool {
-        while let Ok(cmd) = self.cmd_rx.try_recv() {
-            match cmd {
-                HudCommand::Show(cue) => {
-                    if self.handle_show_cue(cue).is_err() {
-                        let _ = self.recover_to_idle();
-                        return false;
-                    }
-                }
-                HudCommand::Shutdown => {
-                    return false;
-                }
+        let mut latest = None;
+        for _ in 0..HUD_COMMAND_QUEUE_BOUND {
+            match self.cmd_rx.try_recv() {
+                Ok(HudCommand::Show(cue)) => latest = Some(cue),
+                Ok(HudCommand::Shutdown) => return false,
+                Err(_) => break,
+            }
+        }
+        if let Some(cue) = latest {
+            if self.handle_show_cue(cue).is_err() {
+                let _ = self.recover_to_idle();
+                return false;
             }
         }
         true
@@ -1523,21 +1467,13 @@ impl HudThreadContext {
 
     unsafe fn handle_show_cue(&mut self, cue: HudCue) -> Result<(), HudError> {
         self._current_generation += 1;
+        self.hold_deadline = None;
+        self.exit_deadline = None;
         let _ = KillTimer(Some(self.hwnd), TIMER_ID_HOLD);
         let _ = KillTimer(Some(self.hwnd), TIMER_ID_EXIT);
 
-        // AttachedHidden: on first cue call ShowWindow(SW_SHOWNOACTIVATE) on worker before cue presentation
-        if !self.window_shown {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-            self.window_shown = true;
-        }
-
-        // Render cue into the DXGI swapchain backbuffer (Zero heap allocations)
+        // Update while hidden, without a competing flip-model swapchain or Present.
         self.render_cue(&cue)?;
-        self.swapchain
-            .Present(0, DXGI_PRESENT(0))
-            .ok()
-            .map_err(|e| HudError::DeviceCreationFailed(e.to_string()))?;
 
         let hold_duration = cue.hold_duration_ms() as u32;
 
@@ -1552,12 +1488,19 @@ impl HudThreadContext {
 
             // Full entrance transition
             self.start_entrance_animation()?;
+            if !self.window_shown {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                self.window_shown = true;
+            }
             self.is_visible = true;
             let entrance_ms = if self.reduced_motion {
                 REDUCED_MOTION_FADE_DURATION_MS as u32
             } else {
                 ENTRANCE_DURATION_MS as u32
             };
+            self.hold_deadline = Some(
+                Instant::now() + Duration::from_millis(u64::from(entrance_ms + hold_duration)),
+            );
             let timer_res = SetTimer(
                 Some(self.hwnd),
                 TIMER_ID_HOLD,
@@ -1568,7 +1511,7 @@ impl HudThreadContext {
                 return self.recover_to_idle();
             }
         } else {
-            // Already visible: updated in place via flip swapchain
+            // Already visible: commit the updated retained surface in place
             self.dcomp_effect_group
                 .SetOpacity2(1.0)
                 .map_err(|e| HudError::CompositionFailed(e.to_string()))?;
@@ -1579,6 +1522,8 @@ impl HudThreadContext {
                 .Commit()
                 .map_err(|e| HudError::CompositionFailed(e.to_string()))?;
 
+            self.hold_deadline =
+                Some(Instant::now() + Duration::from_millis(u64::from(hold_duration)));
             let timer_res = SetTimer(Some(self.hwnd), TIMER_ID_HOLD, hold_duration, None);
             if timer_res == 0 {
                 return self.recover_to_idle();
@@ -1659,6 +1604,9 @@ impl HudThreadContext {
     }
 
     unsafe fn on_hold_timer_expired(&mut self) -> Result<(), HudError> {
+        if !timer_ready(self.hwnd, TIMER_ID_HOLD, &mut self.hold_deadline)? {
+            return Ok(());
+        }
         let _ = KillTimer(Some(self.hwnd), TIMER_ID_HOLD);
         self.start_exit_animation()?;
         let exit_duration = if self.reduced_motion {
@@ -1666,6 +1614,7 @@ impl HudThreadContext {
         } else {
             EXIT_DURATION_MS as u32
         };
+        self.exit_deadline = Some(Instant::now() + Duration::from_millis(u64::from(exit_duration)));
         let timer_res = SetTimer(Some(self.hwnd), TIMER_ID_EXIT, exit_duration, None);
         if timer_res == 0 {
             return self.recover_to_idle();
@@ -1707,6 +1656,9 @@ impl HudThreadContext {
     }
 
     unsafe fn on_exit_timer_expired(&mut self) -> Result<(), HudError> {
+        if !timer_ready(self.hwnd, TIMER_ID_EXIT, &mut self.exit_deadline)? {
+            return Ok(());
+        }
         let _ = KillTimer(Some(self.hwnd), TIMER_ID_EXIT);
         self.is_visible = false;
         self.dcomp_effect_group
@@ -1984,9 +1936,6 @@ impl HudThreadContext {
     }
 
     unsafe fn render_compact_cue(&mut self, cue: &HudCue) {
-        let identity = matrix3x2_identity();
-        self.d2d_context.SetTransform(&identity);
-
         let state_kind = cue.state_kind();
 
         // 1. Compact Container Background Gradient & Border (Section 6.4)
@@ -2140,26 +2089,59 @@ impl HudThreadContext {
     }
 
     unsafe fn render_cue(&mut self, cue: &HudCue) -> Result<(), HudError> {
-        self.d2d_context.BeginDraw();
-        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        }));
+        let mut offset = POINT::default();
+        let update: IDXGISurface = self
+            .surface
+            .BeginDraw(None, &mut offset)
+            .map_err(|e| HudError::CompositionFailed(e.to_string()))?;
+        // Always EndDraw even if target creation or D2D rendering fails.
+        let result = (|| {
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: self.dpi as f32,
+                dpiY: self.dpi as f32,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                colorContext: ManuallyDrop::new(None),
+            };
+            let target = self
+                .d2d_context
+                .CreateBitmapFromDxgiSurface(&update, Some(&props))
+                .map_err(|e| HudError::Direct2DFailed(e.to_string()))?;
+            self.d2d_context.SetTarget(&target);
+            self.d2d_context.SetTransform(&matrix3x2_translation(
+                offset.x as f32 * 96.0 / self.dpi as f32,
+                offset.y as f32 * 96.0 / self.dpi as f32,
+            ));
+            self.d2d_context.BeginDraw();
+            self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }));
 
-        match self.mode {
-            HudMode::Full => self.render_full_cue(cue),
-            HudMode::Compact => self.render_compact_cue(cue),
-        }
+            match self.mode {
+                HudMode::Full => self.render_full_cue(cue),
+                HudMode::Compact => self.render_compact_cue(cue),
+            }
 
-        // Ensure context transform is restored deterministically before EndDraw
-        let identity = matrix3x2_identity();
-        self.d2d_context.SetTransform(&identity);
+            // Ensure context transform is restored deterministically before EndDraw
+            let identity = matrix3x2_identity();
+            self.d2d_context.SetTransform(&identity);
 
-        self.d2d_context
-            .EndDraw(None, None)
-            .map_err(|e| HudError::Direct2DFailed(e.to_string()))
+            self.d2d_context
+                .EndDraw(None, None)
+                .map_err(|e| HudError::Direct2DFailed(e.to_string()))
+        })();
+        self.d2d_context.SetTarget(None);
+        let end_result = self
+            .surface
+            .EndDraw()
+            .map_err(|e| HudError::CompositionFailed(e.to_string()));
+        result.and(end_result)
     }
 }
 
@@ -2183,5 +2165,101 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+// KillTimer does not remove WM_TIMER messages already posted to the queue.
+// A superseded hold/exit must never fade or hide a newer cue.
+fn take_elapsed(deadline: &mut Option<Instant>, now: Instant) -> bool {
+    if deadline.is_some_and(|at| now >= at) {
+        *deadline = None;
+        true
+    } else {
+        false
+    }
+}
+
+// Win32 timers can fire slightly early relative to Instant. Re-arm for the
+// remaining time instead of waiting a whole new hold interval (seconds).
+unsafe fn timer_ready(
+    hwnd: HWND,
+    id: usize,
+    deadline: &mut Option<Instant>,
+) -> Result<bool, HudError> {
+    let now = Instant::now();
+    if take_elapsed(deadline, now) {
+        return Ok(true);
+    }
+    if let Some(at) = *deadline {
+        if SetTimer(Some(hwnd), id, remaining_timer_ms(at, now), None) == 0 {
+            return Err(HudError::CompositionFailed(
+                "could not re-arm HUD timer".into(),
+            ));
+        }
+    }
+    Ok(false)
+}
+
+fn remaining_timer_ms(deadline: Instant, now: Instant) -> u32 {
+    // Round up to the next millisecond; SetTimer also applies its OS minimum.
+    deadline
+        .saturating_duration_since(now)
+        .as_millis()
+        .saturating_add(1)
+        .min(u128::from(u32::MAX)) as u32
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn stale_and_duplicate_timers_cannot_expire_a_replacement_cue() {
+        let start = Instant::now();
+        let mut deadline = Some(start + Duration::from_secs(3));
+        assert!(!take_elapsed(&mut deadline, start + Duration::from_secs(2)));
+        deadline = Some(start + Duration::from_secs(5));
+        assert!(!take_elapsed(&mut deadline, start + Duration::from_secs(3)));
+        assert!(take_elapsed(&mut deadline, start + Duration::from_secs(5)));
+        assert!(!take_elapsed(&mut deadline, start + Duration::from_secs(6)));
+        assert!(!take_elapsed(&mut None, start));
+        assert_eq!(
+            remaining_timer_ms(start + Duration::from_micros(1500), start),
+            2
+        );
+        assert_eq!(remaining_timer_ms(start, start), 1);
+    }
+
+    #[test]
+    #[ignore = "opens actual Windows HUDs; requires an interactive desktop"]
+    fn retained_surface_shows_updates_hides_and_preserves_focus() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindowVisible};
+        for mode in [HudMode::Full, HudMode::Compact] {
+            let hud = NativeHud::try_new(HudConfig {
+                mode,
+                ..Default::default()
+            })
+            .unwrap();
+            let hwnd = HWND(hud.hwnd as *mut _);
+            assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool());
+            let foreground = unsafe { GetForegroundWindow() };
+            for cue in [
+                HudCue::saved(60_000, 90_000_000),
+                HudCue::failed("Test failure"),
+                HudCue::saved(30_000, 45_000_000),
+            ] {
+                hud.try_show(cue).unwrap();
+                std::thread::sleep(Duration::from_millis(250));
+                assert!(hud.is_healthy(), "surface draw must succeed");
+                assert!(unsafe { IsWindowVisible(hwnd) }.as_bool());
+                assert_eq!(unsafe { GetForegroundWindow() }, foreground);
+            }
+            std::thread::sleep(Duration::from_millis(3000));
+            assert!(hud.is_healthy());
+            assert!(
+                !unsafe { IsWindowVisible(hwnd) }.as_bool(),
+                "window must hide after exit"
+            );
+        }
     }
 }

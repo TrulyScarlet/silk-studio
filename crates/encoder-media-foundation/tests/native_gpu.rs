@@ -67,13 +67,38 @@ fn media_foundation_supersamples_wgc_gpu_frame_to_2x_if_bounded() {
 }
 
 fn encode_native_gpu_frames(config: VideoEncoderConfig) -> (u32, Vec<media_types::EncodedPacket>) {
+    encode_with_capture(config, Box::new(WgcDisplayCapture::new(StreamId(0))))
+}
+
+#[test]
+#[ignore = "requires interactive desktop + DXGI + a D3D11-aware H.264 MFT"]
+fn media_foundation_encodes_dxgi_gpu_frames() {
+    let config = VideoEncoderConfig {
+        width: 1280,
+        height: 720,
+        fps: 60,
+        ..VideoEncoderConfig::default()
+    };
+    let (frames, packets) = encode_with_capture(
+        config,
+        Box::new(capture_windows::DxgiDisplayCapture::new(StreamId(0))),
+    );
+    assert_eq!(frames, 120);
+    assert!(!packets.is_empty());
+    assert!(packets.iter().all(|p| p.time_base == TimeBase::MILLISECOND));
+    assert!(packets.windows(2).all(|p| p[1].dts >= p[0].dts));
+}
+
+fn encode_with_capture(
+    config: VideoEncoderConfig,
+    mut capture: Box<dyn VideoCapture>,
+) -> (u32, Vec<media_types::EncodedPacket>) {
     let sources = enumerate_displays().expect("enumeration");
     let primary = sources
         .iter()
         .find(|source| source.is_primary)
         .expect("primary display");
 
-    let mut capture = WgcDisplayCapture::new(StreamId(0));
     capture
         .start(VideoCaptureConfig {
             source_id: primary.id.clone(),

@@ -11,3 +11,7 @@ portfolio-op1/
 Thumbs.db
 .slim/deepwork/
 /.taste-skill/
+*.key
+*.pfx
+*.p12
+*.pem

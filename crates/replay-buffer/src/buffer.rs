@@ -208,10 +208,8 @@ impl ReplayBuffer {
         };
         let boundary = newest - self.config.retention_ms;
 
-        // Phase 1 (immutable): locate the newest keyframe at/before T_b
-        // and the current front DTS.
+        // Phase 1 (immutable): locate the newest keyframe at or before boundary T_b.
         let mut keep_from = None;
-        let front_dts;
         {
             let Some(video_track) = self.streams.get(&video_id) else {
                 return;
@@ -221,25 +219,14 @@ impl ReplayBuffer {
                     keep_from = Some(index);
                 }
             }
-            front_dts = video_track.packets.front().map(|p| p.dts);
         }
         // No eligible keyframe yet: retain everything rather than produce
         // an undecodable prefix later.
         let Some(keep_from) = keep_from else { return };
 
         // Phase 2 (mutable): drop video prefixes, then align other streams.
-        let earliest_kept_dts = if keep_from == 0 {
-            // Front IS the retained keyframe.
-            match front_dts {
-                Some(dts) => dts,
-                None => return,
-            }
-        } else {
-            let dropped_count = keep_from;
-            match self.drop_video_fronts_helper(video_id, dropped_count) {
-                Some(dts) => dts,
-                None => return,
-            }
+        let Some(earliest_kept_dts) = self.drop_video_fronts_helper(video_id, keep_from) else {
+            return;
         };
 
         // Align other streams: drop audio fully before the earliest kept

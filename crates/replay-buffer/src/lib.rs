@@ -20,43 +20,10 @@ mod error;
 pub use buffer::{BufferConfig, BufferMetrics, ReplayBuffer, SnapshotOutcome};
 pub use error::BufferError;
 
-use media_types::{EncodedPacket, MediaSnapshot};
+use media_types::MediaSnapshot;
 
 /// Rebase every timestamp in `snapshot` so the clip starts at zero while
-/// preserving relative order and distinct PTS/DTS values (spec §15.4).
-///
-/// The shift is the smallest PTS/DTS/origin in the snapshot (which may be
-/// negative when display timestamps jitter before stream start); after
-/// shifting, every timestamp is ≥ 0. Idempotent.
+/// preserving relative order and distinct PTS/DTS values (spec §15.4). Idempotent.
 pub fn normalize_timestamps(snapshot: &mut MediaSnapshot) {
-    let mut shift = snapshot.origin_pts;
-    for stream in &snapshot.streams {
-        if let Some(first) = stream.packets.first() {
-            shift = shift.min(first.dts).min(first.pts);
-        }
-    }
-    if shift == 0 {
-        return;
-    }
-    for stream in &mut snapshot.streams {
-        for packet in &mut stream.packets {
-            if let Some(packet) = std::sync::Arc::get_mut(packet) {
-                packet.pts -= shift;
-                packet.dts -= shift;
-            } else {
-                // Shared elsewhere; replace with a shifted copy instead of
-                // mutating in place (never legal under our refcounts).
-                let mut copy = (**packet).clone();
-                copy.pts -= shift;
-                copy.dts -= shift;
-                *packet = std::sync::Arc::new(copy);
-            }
-        }
-    }
-    snapshot.origin_pts -= shift;
-}
-
-/// Convenience: normalized deep view of one packet for validation/tests.
-pub fn normalized_pts(packet: &EncodedPacket, origin: i64) -> i64 {
-    packet.pts - origin
+    snapshot.normalize_timestamps();
 }

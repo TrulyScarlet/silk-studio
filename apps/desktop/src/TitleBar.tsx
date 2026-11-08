@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isMockMode } from "./ipc";
 import { SilkLogo } from "./SilkLogo";
+import { TitleBarUpdate } from "./AppUpdates";
 
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
@@ -73,6 +74,8 @@ export function TitleBar() {
           </span>
         </div>
       </div>
+
+      <TitleBarUpdate />
 
       {/* High-Precision Native-Feel Window Controls */}
       <div className="titlebar-controls" aria-label="Window controls">

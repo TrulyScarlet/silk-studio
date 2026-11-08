@@ -9,6 +9,7 @@ export type HotkeysSettings = {
   saveReplay: string;
   startCapture: string | null;
   stopCapture: string | null;
+  shortcuts?: Record<string, string | null>;
 };
 
 export type OverlayMode = "full" | "compact";
@@ -98,6 +99,7 @@ export type PixelFormat =
   | string;
 
 export type AppTheme = "studio" | "classic" | "ember" | "vamp";
+export type ThemeColors = Partial<Record<"main" | "background" | "text" | "subtext" | "capture" | "replayBuffer", string | null>>;
 
 export type EncoderSelection = "auto" | "hardware" | "software";
 
@@ -137,11 +139,15 @@ export type AppSettings = {
     automaticDeletionEnabled: boolean;
   };
   application: {
+    checkForUpdates?: boolean;
     startWithWindows: boolean;
     minimizeToTray: boolean;
     notificationsEnabled: boolean;
     clipSoundEnabled: boolean;
+    clipSoundVolume: number;
     theme: AppTheme;
+    openClipsFullscreen?: boolean;
+    colors?: ThemeColors;
   };
   diagnostics: {
     loggingLevel: "trace" | "debug" | "info" | "warn" | "error";
@@ -149,6 +155,7 @@ export type AppSettings = {
 };
 
 export type RecorderStatus = {
+  captureTarget?: string | null;
   state: string;
   bufferDurationMs: number;
   bufferedPacketCount: number;

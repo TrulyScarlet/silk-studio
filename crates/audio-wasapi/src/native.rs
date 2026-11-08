@@ -22,7 +22,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
     COINIT_MULTITHREADED, STGM_READ,
 };
-use windows::Win32::System::Performance::QueryPerformanceCounter;
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 
 const QPC_TIME_BASE: TimeBase = TimeBase::new(1, 10_000_000);
@@ -220,8 +220,54 @@ struct CaptureState {
     event: HANDLE,
     format: AudioFormat,
     block_align: usize,
+    silence: SilenceClock,
     // Declared last so COM interface wrappers release before CoUninitialize.
     _com: ComGuard,
+}
+
+/// Count silence from elapsed source-clock time, including scheduler delays.
+/// Anchor/sample arithmetic preserves fractional samples across repeated waits.
+struct SilenceClock {
+    anchor_hns: i64,
+    samples: u64,
+}
+
+impl SilenceClock {
+    fn new(anchor_hns: i64) -> Self {
+        Self {
+            anchor_hns,
+            samples: 0,
+        }
+    }
+    fn until(&mut self, now_hns: i64, rate: u32) -> Option<(i64, u32)> {
+        let elapsed = now_hns.saturating_sub(self.anchor_hns).max(0) as u128;
+        let due = (elapsed * u128::from(rate) / 10_000_000).min(u128::from(u64::MAX)) as u64;
+        // At most 100 ms of silence per allocation, even after a long stall.
+        let count = due.saturating_sub(self.samples).min(u64::from(rate / 10)) as u32;
+        if count == 0 {
+            return None;
+        }
+        let pts =
+            self.anchor_hns + (u128::from(self.samples) * 10_000_000 / u128::from(rate)) as i64;
+        self.samples += u64::from(count);
+        Some((pts, count))
+    }
+    fn observe(&mut self, frame: &AudioFrame) {
+        self.anchor_hns =
+            frame.pts + i64::from(frame.sample_count) * 10_000_000 / i64::from(frame.sample_rate);
+        self.samples = 0;
+    }
+}
+
+fn qpc_hns() -> Result<i64> {
+    let mut ticks = 0;
+    let mut frequency = 0;
+    unsafe {
+        QueryPerformanceCounter(&mut ticks).map_err(|e| backend_error("read audio clock", e))?;
+        QueryPerformanceFrequency(&mut frequency)
+            .map_err(|e| backend_error("read audio clock frequency", e))?;
+    }
+    Ok((i128::from(ticks) * 10_000_000 / i128::from(frequency)) as i64)
 }
 
 impl Drop for CaptureState {
@@ -417,8 +463,10 @@ impl AudioCapture for WasapiAudioCapture {
             event,
             format,
             block_align,
+            silence: SilenceClock::new(0),
             _com: com,
         });
+        self.state.as_mut().expect("state").silence = SilenceClock::new(qpc_hns()?);
         diagnostics::info(
             "wasapi",
             &format!(
@@ -449,26 +497,43 @@ impl AudioCapture for WasapiAudioCapture {
                 self.format = None;
                 return Ok(AudioCaptureEvent::DeviceLost);
             }
-            let wait =
-                unsafe { WaitForSingleObject(self.state.as_ref().expect("state").event, 50) };
+            // Drain available endpoint packets before waiting for another event.
+            let queued = unsafe {
+                self.state
+                    .as_ref()
+                    .expect("state")
+                    .capture
+                    .GetNextPacketSize()
+            };
+            let wait = if queued.as_ref().is_ok_and(|size| *size > 0) {
+                windows::Win32::Foundation::WAIT_EVENT(WAIT_OBJECT_0)
+            } else {
+                unsafe { WaitForSingleObject(self.state.as_ref().expect("state").event, 50) }
+            };
             if wait.0 == WAIT_TIMEOUT {
-                // When an endpoint is silent (especially WASAPI loopback where Windows halts buffer events
-                // when no application is actively rendering audio), synthesize a silent audio frame for the
-                // elapsed interval. This keeps the stream clock continuous and prevents timeline drift,
-                // discontinuity errors, voice pacing compression, and missing tracks in the replay buffer.
+                // Recheck after timeout so real audio arriving at the boundary is
+                // not replaced by silence. Windows may round a 50 ms wait to 62.5
+                // ms; always synthesize the measured gap, not a fixed 50 ms.
                 if let Some(state) = self.state.as_mut() {
-                    let frames = (state.format.sample_rate / 20).max(1); // 50ms of frames
+                    match unsafe { state.capture.GetNextPacketSize() } {
+                        Ok(size) if size > 0 => continue,
+                        Err(error) => return Err(map_capture_error(error)),
+                        _ => {}
+                    }
+                    let Some((pts, frames)) =
+                        state.silence.until(qpc_hns()?, state.format.sample_rate)
+                    else {
+                        return Err(AudioCaptureError::Timeout);
+                    };
                     let byte_len = (frames as usize) * state.block_align;
                     let payload = vec![0_u8; byte_len];
-                    let mut qpc = 0_i64;
-                    let _ = unsafe { QueryPerformanceCounter(&mut qpc) };
                     return Ok(AudioCaptureEvent::Frames(AudioFrame {
-                        stream_id: media_types::StreamId(0),
+                        stream_id: self.stream_id,
                         sample_format: state.format.sample_format,
                         sample_rate: state.format.sample_rate,
                         channels: state.format.channels,
                         sample_count: frames,
-                        pts: qpc,
+                        pts,
                         time_base: QPC_TIME_BASE,
                         data: Arc::from(payload.into_boxed_slice()),
                     }));
@@ -493,6 +558,7 @@ impl AudioCapture for WasapiAudioCapture {
             }
             match read_packet(self.state.as_mut().expect("state")) {
                 Ok(Some(frame)) => {
+                    self.state.as_mut().expect("state").silence.observe(&frame);
                     if self
                         .state
                         .as_ref()
@@ -679,9 +745,7 @@ fn read_packet(state: &mut CaptureState) -> Result<Option<AudioFrame>> {
     let pts = if qpc_position != QPC_POSITION_INVALID && qpc_position > 0 {
         qpc_position as i64
     } else {
-        let mut qpc = 0_i64;
-        let _ = unsafe { QueryPerformanceCounter(&mut qpc) };
-        qpc
+        qpc_hns()?
     };
     Ok(Some(AudioFrame {
         stream_id: media_types::StreamId(0),
@@ -728,6 +792,72 @@ fn pcwstr_matches(value: &PCWSTR, expected: &[u16]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an interactive Windows audio endpoint"]
+    fn loopback_sample_duration_matches_elapsed_capture_time() {
+        let mut capture = WasapiAudioCapture::loopback();
+        capture.start(AudioCaptureConfig::default()).unwrap();
+        let rate = capture.format().unwrap().sample_rate;
+        let started = std::time::Instant::now();
+        let mut count = 0_u64;
+        let mut first = None;
+        let mut end = 0;
+        while started.elapsed() < std::time::Duration::from_secs(5) {
+            match capture.next_event() {
+                Ok(AudioCaptureEvent::Frames(frame)) => {
+                    first.get_or_insert(frame.pts);
+                    end = frame.pts + i64::from(frame.sample_count) * 10_000_000 / i64::from(rate);
+                    count += u64::from(frame.sample_count);
+                }
+                Err(AudioCaptureError::Timeout) => continue,
+                other => panic!("unexpected capture event: {other:?}"),
+            }
+        }
+        capture.stop().unwrap();
+        let samples_seconds = count as f64 / f64::from(rate);
+        let timestamp_seconds = (end - first.unwrap()) as f64 / 10_000_000.0;
+        println!("samples={samples_seconds:.6}s, timestamp span={timestamp_seconds:.6}s");
+        assert!((samples_seconds - timestamp_seconds).abs() < 0.080);
+        assert!(samples_seconds >= 4.9);
+    }
+
+    #[test]
+    fn silence_uses_elapsed_time_including_wait_rounding_without_drift() {
+        for rate in [44_100, 48_000] {
+            let mut clock = SilenceClock::new(7_000_000);
+            let mut samples = 0_u64;
+            // 9,600 waits rounded to 62.5 ms span ten minutes, not eight.
+            for tick in 1..=9_600 {
+                let (pts, count) = clock.until(7_000_000 + tick * 625_000, rate).unwrap();
+                assert_eq!(
+                    pts,
+                    7_000_000 + (samples * 10_000_000 / u64::from(rate)) as i64
+                );
+                samples += u64::from(count);
+            }
+            assert_eq!(samples, u64::from(rate) * 600);
+        }
+    }
+
+    #[test]
+    fn silence_allocations_are_bounded_and_real_audio_sets_next_origin() {
+        let mut clock = SilenceClock::new(0);
+        assert_eq!(clock.until(-1, 48_000), None);
+        assert_eq!(clock.until(100_000_000, 48_000), Some((0, 4_800)));
+        let frame = AudioFrame {
+            stream_id: media_types::StreamId(1),
+            sample_format: SampleFormat::F32,
+            sample_rate: 48_000,
+            channels: 2,
+            sample_count: 480,
+            pts: 100_000_000,
+            time_base: QPC_TIME_BASE,
+            data: Arc::from(vec![0_u8; 480 * 8]),
+        };
+        clock.observe(&frame);
+        assert_eq!(clock.until(100_600_000, 48_000), Some((100_100_000, 2_400)));
+    }
 
     fn wave_format(bits: u16, channels: u16, sample_rate: u32, block_align: u16) -> WAVEFORMATEX {
         WAVEFORMATEX {

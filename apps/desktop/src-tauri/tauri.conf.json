@@ -11,6 +11,7 @@
     "windows": [
       {
         "title": "Silk",
+        "visible": false,
         "width": 1440,
         "height": 920,
         "minWidth": 960,
@@ -25,14 +26,20 @@
       "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:5173 ws://localhost:5173; img-src 'self' asset: http://asset.localhost https://asset.localhost data:; media-src 'self' asset: http://asset.localhost https://asset.localhost data: blob:; style-src 'self'; script-src 'self'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/icon.png"],
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.png"
+    ],
     "category": "Utility",
     "shortDescription": "Local instant-replay clipping",
     "longDescription": "A Windows-first instant-replay recorder that keeps clips local and bounded.",
@@ -48,6 +55,22 @@
         "displayLanguageSelector": false,
         "compression": "lzma"
       }
+    },
+    "createUpdaterArtifacts": true,
+    "resources": {
+      "../../../licenses/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFERjAyMEE2RjM3QzU2QUUKUldTdVZuenpwaUR3cmJxNWhYVFJwN1g4TFREZ2J6MExnaWZlc2NEU1pXUlVqWTNEQkRrKzVFLy8K",
+      "windows": {
+        "installMode": "passive"
+      },
+      "endpoints": [
+        "https://github.com/TrulyScarlet/silk-studio/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true
     }
   }
 }

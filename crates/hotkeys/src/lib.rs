@@ -370,6 +370,14 @@ pub fn parse_native_chord(chord: &str) -> Result<(u32, u16), HotkeyError> {
 }
 
 fn virtual_key_code(key: &str) -> Option<u16> {
+    if let Some(number) = key
+        .strip_prefix("NUMPAD")
+        .and_then(|n| n.parse::<u16>().ok())
+    {
+        if number <= 9 {
+            return Some(0x60 + number);
+        }
+    }
     if key.len() == 1 {
         let byte = key.as_bytes()[0];
         if byte.is_ascii_uppercase() || byte.is_ascii_digit() {
@@ -393,6 +401,34 @@ fn virtual_key_code(key: &str) -> Option<u16> {
         "TAB" => Some(0x09),
         "ENTER" => Some(0x0D),
         "ESC" => Some(0x1B),
+        "COMMA" => Some(0xBC),
+        "PERIOD" => Some(0xBE),
+        "SLASH" => Some(0xBF),
+        "SEMICOLON" => Some(0xBA),
+        "QUOTE" => Some(0xDE),
+        "BRACKETLEFT" => Some(0xDB),
+        "BRACKETRIGHT" => Some(0xDD),
+        "BACKSLASH" => Some(0xDC),
+        "BACKQUOTE" => Some(0xC0),
+        "MINUS" => Some(0xBD),
+        "EQUAL" => Some(0xBB),
+        "BACKSPACE" => Some(0x08),
+        "DELETE" => Some(0x2E),
+        "INSERT" => Some(0x2D),
+        "HOME" => Some(0x24),
+        "END" => Some(0x23),
+        "PAGEUP" => Some(0x21),
+        "PAGEDOWN" => Some(0x22),
+        "PAUSE" => Some(0x13),
+        "CAPSLOCK" => Some(0x14),
+        "SCROLLLOCK" => Some(0x91),
+        "NUMLOCK" => Some(0x90),
+        "PRINTSCREEN" => Some(0x2C),
+        "NUMPADADD" => Some(0x6B),
+        "NUMPADSUBTRACT" => Some(0x6D),
+        "NUMPADMULTIPLY" => Some(0x6A),
+        "NUMPADDIVIDE" => Some(0x6F),
+        "NUMPADDECIMAL" => Some(0x6E),
         _ => None,
     }
 }
@@ -778,6 +814,25 @@ fn run_hotkey_loop(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn punctuation_navigation_and_numpad_chords_reach_the_native_bridge() {
+        for (chord, virtual_key) in [
+            ("Ctrl+COMMA", 0xBC),
+            ("Ctrl+PERIOD", 0xBE),
+            ("Ctrl+DELETE", 0x2E),
+            ("Ctrl+HOME", 0x24),
+            ("Ctrl+PAGEUP", 0x21),
+            ("Ctrl+NUMPAD0", 0x60),
+            ("Ctrl+NUMPAD9", 0x69),
+            ("Ctrl+NUMPADADD", 0x6B),
+            ("Ctrl+BACKQUOTE", 0xC0),
+        ] {
+            assert_eq!(
+                super::parse_native_chord(chord).unwrap(),
+                (0x0002, virtual_key)
+            );
+        }
+    }
     use super::*;
 
     #[test]
@@ -862,7 +917,9 @@ mod tests {
         assert_eq!(virtual_key_code("F1"), Some(0x70));
         assert_eq!(virtual_key_code("F24"), Some(0x87));
         assert_eq!(virtual_key_code("F25"), None);
-        assert_eq!(virtual_key_code("PAGEUP"), None);
+        assert_eq!(virtual_key_code("PAGEUP"), Some(0x21));
+        assert_eq!(virtual_key_code("NUMPAD10"), None);
+        assert_eq!(virtual_key_code("HYPER"), None);
     }
 
     #[test]

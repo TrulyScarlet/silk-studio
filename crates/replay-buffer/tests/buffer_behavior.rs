@@ -114,7 +114,21 @@ fn sequences_are_globally_monotonic_across_streams() {
     let mut buffer = buffer_with_retention(60_000);
     ScriptedStream::fill(&mut buffer, 500);
     let metrics = buffer.metrics();
-    assert_eq!(metrics.packet_count, (500 / 33 + 1) * 2);
+    let expected_count = (500 / 33 + 1) * 2;
+    assert_eq!(metrics.packet_count, expected_count);
+
+    let snapshot = buffer.snapshot(0).expect("snapshot");
+    let mut sequences: Vec<u64> = snapshot
+        .media
+        .streams
+        .iter()
+        .flat_map(|stream| stream.packets.iter().map(|packet| packet.sequence))
+        .collect();
+    assert_eq!(sequences.len(), expected_count);
+    sequences.sort_unstable();
+    for (idx, &seq) in sequences.iter().enumerate() {
+        assert_eq!(seq, idx as u64, "Sequence mismatch at index {}", idx);
+    }
 }
 
 #[test]

@@ -28,7 +28,8 @@ use std::time::Duration;
 use windows::core::{factory, IInspectable, Interface};
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
-    Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
+    Direct3D11CaptureFramePool, GraphicsCaptureAccess, GraphicsCaptureAccessKind,
+    GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Graphics::Direct3D11::{
@@ -797,7 +798,25 @@ fn run_session_inner(
 
     let session = pool.CreateCaptureSession(&item).cap()?;
     session.SetIsCursorCaptureEnabled(cursor_capture).cap()?;
-    let _ = session.SetIsBorderRequired(false);
+    // Windows requires consent before it will honor IsBorderRequired=false.
+    // Negotiate before StartCapture, never on the real-time frame callback.
+    match GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
+        .and_then(|operation| operation.join())
+    {
+        Ok(windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus::Allowed) => {
+            if let Err(error) = session.SetIsBorderRequired(false) {
+                diagnostics::warn("wgc", &format!("borderless capture unavailable: {error}"));
+            }
+        }
+        Ok(status) => diagnostics::warn(
+            "wgc",
+            &format!("borderless capture permission not granted ({status:?}); Windows may show its capture border"),
+        ),
+        Err(error) => diagnostics::warn(
+            "wgc",
+            &format!("borderless capture permission unavailable: {error}; retaining Windows capture indicator"),
+        ),
+    }
     session.StartCapture().cap()?;
     diagnostics::info(
         "wgc",

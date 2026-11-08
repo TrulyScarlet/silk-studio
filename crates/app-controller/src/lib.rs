@@ -19,9 +19,7 @@ pub use controller::{
     DEFAULT_MINIMUM_FREE_SPACE_BYTES,
 };
 pub use events::ControllerEvent;
-pub use jobs::{
-    JobQueueError, SaveJobManager, SaveMetrics, SaveResult, SaveWork, SaveWorker, SAVE_QUEUE_BOUND,
-};
+pub use jobs::{JobQueueError, SaveMetrics, SaveResult, SaveWork, SaveWorker, SAVE_QUEUE_BOUND};
 pub use notification::{
     CollectingNotificationSink, ConsoleNotificationSink, NotificationContent, NotificationSeverity,
     NotificationSink,

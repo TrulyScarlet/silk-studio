@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'release-tools.ps1')
 $failures = [System.Collections.Generic.List[string]]::new()
 $warnings = [System.Collections.Generic.List[string]]::new()
 
@@ -71,6 +72,18 @@ if (Test-Path -LiteralPath $tauriPath -PathType Leaf) {
     if ([string]$tauri.bundle.windows.webviewInstallMode.type -ne "downloadBootstrapper") {
         Add-Failure "WebView2 install mode must be explicitly configured."
     }
+    if (-not $tauri.bundle.createUpdaterArtifacts -or -not $tauri.plugins.updater.requireSignedVersion) {
+        Add-Failure 'Version-bound signed updater artifacts must be enabled.'
+    }
+    if ($tauri.plugins.updater.dangerousInsecureTransportProtocol -or $tauri.plugins.updater.dangerousAcceptInvalidCerts -or $tauri.plugins.updater.allowDowngrades) {
+        Add-Failure 'Insecure transport or updater downgrades cannot be released.'
+    }
+    if (@($tauri.plugins.updater.endpoints).Count -ne 1 -or $tauri.plugins.updater.endpoints[0] -ne 'https://github.com/TrulyScarlet/silk-studio/releases/latest/download/latest.json') {
+        Add-Failure 'Release updater endpoint must be the official Silk feed.'
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$tauri.plugins.updater.pubkey)) {
+        Add-Failure 'The updater public key is missing.'
+    }
 }
 
 $toolchainPath = Join-Path $root "rust-toolchain.toml"
@@ -118,6 +131,9 @@ Require-Command "npm" $Release | Out-Null
 Require-Command "cargo-tauri" $Release | Out-Null
 Require-Command "makensis" $Release | Out-Null
 Require-Command "signtool" $Release | Out-Null
+if ($Release -and [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+    Add-Failure 'TAURI_SIGNING_PRIVATE_KEY is required to sign updater artifacts.'
+}
 
 $signingVariables = @(
     "SILK_WINDOWS_CERTIFICATE_THUMBPRINT",

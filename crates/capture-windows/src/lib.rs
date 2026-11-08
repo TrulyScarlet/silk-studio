@@ -1,4 +1,8 @@
-//! Native Windows Graphics Capture backend (Segment S2).
+//! Windows monitor capture backends: Desktop Duplication with WGC fallback.
+//!
+//! [`DisplayCapture`] selects DXGI first. [`DxgiDisplayCapture`] owns a dedicated
+//! polling worker, fixed GPU leases, and a bounded event queue. Rotated or
+//! unsupported displays fall back to [`WgcDisplayCapture`] at startup. See ADR 0027.
 //!
 //! Implements `capture_api::VideoCapture` for one selected display using
 //! Windows Graphics Capture over Direct3D 11 (spec VID-001…009, §13.2).
@@ -15,11 +19,18 @@
 //! content via the OS (VID-011).
 
 mod device;
+mod display;
+mod dxgi;
+mod dxgi_cursor;
+mod dxgi_pool;
 mod enumerate;
 mod session;
 
+pub use display::DisplayCapture;
+pub use dxgi::DxgiDisplayCapture;
 pub use enumerate::{
-    enumerate_adapters, enumerate_displays, enumerate_windows, GraphicsAdapterInfo,
+    capture_target_window, enumerate_adapters, enumerate_displays, enumerate_windows,
+    GraphicsAdapterInfo,
 };
 pub use gpu_windows::GpuTextureSlot;
 pub use session::WgcDisplayCapture;

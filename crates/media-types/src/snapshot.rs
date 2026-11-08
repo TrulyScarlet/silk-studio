@@ -65,6 +65,34 @@ impl MediaSnapshot {
         let last = video.packets.last()?;
         Some(last.pts.saturating_sub(self.origin_pts) + last.duration)
     }
+
+    /// Rebase every timestamp so the clip starts at zero while preserving
+    /// relative order and distinct PTS/DTS values (spec §15.4). Idempotent.
+    pub fn normalize_timestamps(&mut self) {
+        let mut shift = self.origin_pts;
+        for stream in &self.streams {
+            if let Some(first) = stream.packets.first() {
+                shift = shift.min(first.dts).min(first.pts);
+            }
+        }
+        if shift == 0 {
+            return;
+        }
+        for stream in &mut self.streams {
+            for packet in &mut stream.packets {
+                if let Some(packet) = Arc::get_mut(packet) {
+                    packet.pts -= shift;
+                    packet.dts -= shift;
+                } else {
+                    let mut copy = (**packet).clone();
+                    copy.pts -= shift;
+                    copy.dts -= shift;
+                    *packet = Arc::new(copy);
+                }
+            }
+        }
+        self.origin_pts -= shift;
+    }
 }
 
 #[cfg(test)]

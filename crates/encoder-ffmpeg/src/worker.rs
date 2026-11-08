@@ -482,12 +482,17 @@ mod tests {
     }
 
     fn temp_directory() -> PathBuf {
+        static NEXT_DIRECTORY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("silk-ffmpeg-worker-{nonce}"));
-        fs::create_dir_all(&path).expect("temp directory");
+        let sequence = NEXT_DIRECTORY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "silk-ffmpeg-worker-{}-{nonce}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).expect("unique temp directory");
         path
     }
 

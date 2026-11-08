@@ -5,15 +5,25 @@ configured audio tracks into a bounded replay buffer. Pressing a global hotkey
 saves the previous configurable period as a standard video clip — fast,
 reliable clipping without accounts, cloud services, or streaming complexity.
 
-**Status:** S9 preparation in progress — native capture/audio/encoding/muxing
-foundations, replay buffering, independently configured audio tracks, global
-hotkeys, tray controls, settings, capture confirmation, filesystem-backed clip
-management, deterministic recovery tests, and redacted diagnostic export are
-present. Native hardware recovery, eight-hour endurance, playback/media
-validation, post-save compression, signed packaging, and final acceptance
-remain open. Clips can be organized below a user-selected base directory in
-Silk-managed game folders; foreground attribution remains best-effort until
-interactive Windows verification is complete.
+**Status:** preparing the first public Windows release. Silk includes DXGI desktop
+capture, independently configured audio tracks, configurable hotkeys, themes,
+fullscreen/theater playback, favorites, VOD review markers, size-limited share
+copies, native file drag and drop, and signed one-click application updates.
+Settings and clips remain on the device. Game attribution is best effort; capture
+uses desktop duplication rather than graphics hooks or process injection.
+
+Updates are announced in the title bar and in Settings → System. Clicking
+**Update & restart** downloads a signed installer and restarts Silk. Saved clips
+and settings stay; the unsaved replay buffer starts fresh. Automatic checks can
+be disabled. A Git push alone does not publish an app update: the versioned
+GitHub Release must include the installer, signature, and `latest.json` feed.
+
+Original-file sharing works without extra tools. The 10/50/100 MB share-copy
+presets require the separately installed, approved FFmpeg/FFprobe pair described
+in [the dependency inventory](THIRD_PARTY_LICENSES.md). These binaries are not
+bundled. Windows publisher signing and clean-machine acceptance are separate
+release gates; broad hardware compatibility and eight-hour endurance are not
+claimed from local tests.
 
 ## Documentation
 
@@ -30,7 +40,7 @@ interactive Windows verification is complete.
 
 - Windows 10 (1903+) or Windows 11
 - Rust 1.98.0 MSVC toolchain from `rust-toolchain.toml` with Visual Studio Build Tools
-- Node.js 18+ and npm 10+
+- Node.js 22+ and npm 10+
 
 ## Getting started
 
@@ -65,7 +75,6 @@ cd apps/desktop; npm run typecheck; npm run lint; npm run build
 
 ## Licensing
 
-Licensing of this project itself is not finalized; see `LICENSE` and
-`THIRD_PARTY_LICENSES.md`. No GPL dependency may be introduced without
-explicit approval, and no FFmpeg component is linked before a documented
-build-flag review (see spec §26).
+Silk retains its MIT license; see `LICENSE` and `THIRD_PARTY_LICENSES.md`.
+Redistribution notices are bundled with the installer. No FFmpeg component is
+linked into the application; the approved optional tool runs as a separate process.

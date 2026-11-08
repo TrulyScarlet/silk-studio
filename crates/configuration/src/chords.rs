@@ -34,6 +34,12 @@ fn modifier_rank(token: &str) -> Option<usize> {
 }
 
 fn is_valid_key(token: &str) -> bool {
+    if token
+        .strip_prefix("NUMPAD")
+        .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit())
+    {
+        return true;
+    }
     if token.len() == 1
         && token
             .chars()
@@ -49,7 +55,41 @@ fn is_valid_key(token: &str) -> bool {
     }
     matches!(
         token,
-        "UP" | "DOWN" | "LEFT" | "RIGHT" | "SPACE" | "TAB" | "ENTER" | "ESC"
+        "UP" | "DOWN"
+            | "LEFT"
+            | "RIGHT"
+            | "SPACE"
+            | "TAB"
+            | "ENTER"
+            | "ESC"
+            | "COMMA"
+            | "PERIOD"
+            | "SLASH"
+            | "SEMICOLON"
+            | "QUOTE"
+            | "BRACKETLEFT"
+            | "BRACKETRIGHT"
+            | "BACKSLASH"
+            | "BACKQUOTE"
+            | "MINUS"
+            | "EQUAL"
+            | "BACKSPACE"
+            | "DELETE"
+            | "INSERT"
+            | "HOME"
+            | "END"
+            | "PAGEUP"
+            | "PAGEDOWN"
+            | "PAUSE"
+            | "CAPSLOCK"
+            | "SCROLLLOCK"
+            | "NUMLOCK"
+            | "PRINTSCREEN"
+            | "NUMPADADD"
+            | "NUMPADSUBTRACT"
+            | "NUMPADMULTIPLY"
+            | "NUMPADDIVIDE"
+            | "NUMPADDECIMAL"
     )
 }
 

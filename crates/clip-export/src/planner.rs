@@ -565,9 +565,6 @@ mod tests {
         assert_eq!(TargetSize::Medium.bytes(), 50_000_000);
         assert_eq!(TargetSize::Large.bytes(), 500_000_000);
         assert_eq!(TargetSize::Custom(123_456_789).bytes(), 123_456_789);
-        assert_eq!(SMALL_TARGET_BYTES, 20_000_000);
-        assert_eq!(MEDIUM_TARGET_BYTES, 50_000_000);
-        assert_eq!(LARGE_TARGET_BYTES, 500_000_000);
     }
 
     #[test]

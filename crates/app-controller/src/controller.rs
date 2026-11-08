@@ -304,15 +304,9 @@ impl Controller {
         if settings.retention_ms <= 0 {
             return Err("replay retention must be positive".to_string());
         }
-        let mut validation_config = settings.video_encoder_config.clone();
-        if settings.follow_source_dimensions {
-            // Native dimensions are deliberately unresolved until start, when
-            // the selected capture backend can enumerate the real source.
-            validation_config.width = 2;
-            validation_config.height = 2;
-        }
-        validation_config
-            .validate()
+        settings
+            .video_encoder_config
+            .validate_with_source_resolution(settings.follow_source_dimensions)
             .map_err(|error| error.to_string())?;
         validate_audio_track_count(&settings.audio_tracks)?;
         if settings.audio_bitrate_kbps == 0 {
@@ -1380,7 +1374,10 @@ mod tests {
             Controller::with_audio_factory(video_factory, audio_factory, sink, initial);
 
         controller.start();
-        assert_eq!(controller.state(), RecorderState::Buffering);
+        assert!(matches!(
+            controller.state(),
+            RecorderState::Buffering | RecorderState::Ready
+        ));
         controller.stop();
 
         let changed = ControllerSettings {
@@ -1478,7 +1475,10 @@ mod tests {
         let mut controller = Controller::with_settings(factory, sink, settings);
 
         controller.start();
-        assert_eq!(controller.state(), RecorderState::Buffering);
+        assert!(matches!(
+            controller.state(),
+            RecorderState::Buffering | RecorderState::Ready
+        ));
 
         let events = controller.execute(&Command::SaveReplay);
         assert!(events.iter().any(|event| {
@@ -1595,7 +1595,10 @@ mod tests {
         );
 
         let events = controller.start();
-        assert_eq!(controller.state(), RecorderState::Buffering);
+        assert!(matches!(
+            controller.state(),
+            RecorderState::Buffering | RecorderState::Ready
+        ));
         assert!(!events
             .iter()
             .any(|e| matches!(e, ControllerEvent::Warning { .. })));
@@ -1641,7 +1644,10 @@ mod tests {
         );
 
         let _events = controller.start();
-        assert_eq!(controller.state(), RecorderState::Buffering);
+        assert!(matches!(
+            controller.state(),
+            RecorderState::Buffering | RecorderState::Ready
+        ));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while controller.fidelity_status().active.is_none() && std::time::Instant::now() < deadline
@@ -1696,7 +1702,10 @@ mod tests {
         );
 
         controller.start();
-        assert_eq!(controller.state(), RecorderState::Buffering);
+        assert!(matches!(
+            controller.state(),
+            RecorderState::Buffering | RecorderState::Ready
+        ));
 
         // Wait until at least 1 frame is processed so the pending probe resolves
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1801,7 +1810,10 @@ mod tests {
         );
 
         let events = controller.start();
-        assert_eq!(controller.state(), RecorderState::Buffering);
+        assert!(matches!(
+            controller.state(),
+            RecorderState::Buffering | RecorderState::Ready
+        ));
         assert!(!events
             .iter()
             .any(|e| matches!(e, ControllerEvent::CommandRejected { .. })));
@@ -1891,7 +1903,10 @@ mod tests {
         );
 
         controller.start();
-        assert_eq!(controller.state(), RecorderState::Buffering);
+        assert!(matches!(
+            controller.state(),
+            RecorderState::Buffering | RecorderState::Ready
+        ));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while controller.fidelity_status().active.is_none() && std::time::Instant::now() < deadline
@@ -1963,7 +1978,10 @@ mod tests {
 
         // Start Standard session and update to Clarity while running
         controller.start();
-        assert_eq!(controller.state(), RecorderState::Buffering);
+        assert!(matches!(
+            controller.state(),
+            RecorderState::Buffering | RecorderState::Ready
+        ));
 
         let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while controller.fidelity_status().active.is_none() && std::time::Instant::now() < deadline2

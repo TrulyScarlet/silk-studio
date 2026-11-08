@@ -1,6 +1,6 @@
 //! Native Windows HUD implementation for capture confirmations.
 //!
-//! Provides a zero-window-mutation, Direct2D/DirectComposition HUD surface for
+//! Provides a retained-surface, Direct2D/DirectComposition HUD surface for
 //! nonblocking queued/saved/failed gameplay feedback.
 
 pub mod format;
