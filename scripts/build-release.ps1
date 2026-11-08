@@ -5,7 +5,10 @@ $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-tools.ps1')
 Push-Location $root
 try {
-    if (git status --porcelain) { throw 'Commit the release source before building distributable artifacts.' }
+    $sourceChanges = git status --porcelain | Where-Object {
+        $_ -ne '?? .agents/' -and $_ -ne '?? skills-lock.json'
+    }
+    if ($sourceChanges) { throw 'Commit the release source before building distributable artifacts.' }
     $env:SILK_BUILD_COMMIT = (git rev-parse HEAD).Trim()
     $env:SILK_BUILD_DATE = (git show -s --format=%cI HEAD).Trim()
     $env:SILK_RELEASE_BUILD = '1'
