@@ -32,7 +32,7 @@ are the current lockfile resolutions; the full transitive closure is checked by
 | silk-mp4 0.14.0-silk.1, local attributed fork of mp4 0.14.0 ([upstream](https://github.com/alfg/mp4-rust), provenance in `crates/mp4-silk/UPSTREAM.md`) | Direct MP4 muxing and project-maintained codec sample entries | MIT | Static (pure Rust) | Embedded in binaries | Yes; upstream `LICENSE` retained with the fork | Reviewed; bundled notices |
 | bytes 1.12.1 ([crates.io](https://crates.io/crates/bytes/1.12.1)) | Sample byte buffers | MIT OR Apache-2.0 | Static (pure Rust) | Embedded in binaries | Yes | Reviewed; bundled notices |
 | Windows APIs | Platform integration | Platform terms | System-provided | System-provided | Platform terms | Required |
-| FFmpeg 9.0.1 Gyan full build ([Gyan builds](https://www.gyan.dev/ffmpeg/builds/), [release archive](https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z), [source commit](https://github.com/FFmpeg/FFmpeg/commit/bf1b838f2a), [official legal considerations](https://ffmpeg.org/legal.html)) | Standalone optional export/media-validation tooling not linked into the desktop product | GPLv3 for the full build; FFmpeg core is LGPLv2.1-or-later | External static process; not linked into Silk | Approved `ffmpeg.exe`/`ffprobe.exe` pair; bundling remains a release decision | GPLv3, FFmpeg/component notices, corresponding source or source offer, exact build configuration | **Approved by maintainer instruction on 2026-08-28; exact binary hashes required** |
+| FFmpeg 9.0.1 Gyan full build ([Gyan builds](https://www.gyan.dev/ffmpeg/builds/), [release archive](https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z), [source commit](https://github.com/FFmpeg/FFmpeg/commit/bf1b838f2a), [official legal considerations](https://ffmpeg.org/legal.html)) | Standalone optional export/media-validation tooling not linked into the desktop product | GPLv3 for the full build; FFmpeg core is LGPLv2.1-or-later | External static process; not linked into Silk | Approved pair automatically downloaded from publisher during setup (0.1.1) | GPLv3, FFmpeg/component notices, corresponding source or source offer, exact build configuration | **Approved by maintainer instruction on 2026-08-28; exact binary hashes required** |
 | PresentMon 2.5.1 ([GameTechDev/PresentMon v2.5.1](https://github.com/GameTechDev/PresentMon/releases/tag/v2.5.1)) | Local ETW/presentation measurement | MIT | Standalone external developer tool, not linked | Portable binary downloaded only to approved temp location, not distributed with Silk | Notice required only if redistributed | **Local Phase 3 measurement approved by user on 2026-08-31; distribution unapproved/not planned** |
 
 The desktop shell also directly uses the existing `windows` 0.62.2 bindings for
@@ -47,7 +47,8 @@ Windows Cargo resolutions and production npm packages by
 under `licenses/overrides` with immutable upstream source URLs. The existing
 MPL-2.0 transitive packages (CSS parsing/selectors and platform directory helpers)
 remain unmodified; their license texts and versioned crate source locations are
-included. No GPL library is linked into Silk. External FFmpeg is not bundled.
+included. No GPL library is linked into Silk. External FFmpeg is not bundled; setup automatically obtains the exact approved
+package directly from its publisher (ADR 0037), retaining LICENSE and README.
 
 - `tauri-plugin-updater` 2.14.1 (MIT OR Apache-2.0): official Tauri update
   manifest parsing, version-bound Minisign verification, and Windows NSIS
@@ -57,6 +58,12 @@ included. No GPL library is linked into Silk. External FFmpeg is not bundled.
   Permissive license reviewed. No frontend updater permissions or signing secrets.
 
 ## Approved FFmpeg artifact
+
+Automatic setup uses the versioned upstream ZIP:
+https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build.zip
+
+ZIP SHA-256: `2E8E28AF97C2AE338CCEF92E36DA9B2A4CD21D0CAD9DDE093545606CB07F5B00`.
+The contained executable hashes are unchanged.
 
 - Distribution: WinGet package `Gyan.FFmpeg` version `9.0.1`, corresponding to
   Gyan's `ffmpeg-release-full.7z` archive.

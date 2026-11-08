@@ -5,7 +5,7 @@ configured audio tracks into a bounded replay buffer. Pressing a global hotkey
 saves the previous configurable period as a standard video clip — fast,
 reliable clipping without accounts, cloud services, or streaming complexity.
 
-**Status:** preparing the first public Windows release. Silk includes DXGI desktop
+**Status:** public Windows release. Silk includes DXGI desktop
 capture, independently configured audio tracks, configurable hotkeys, themes,
 fullscreen/theater playback, favorites, VOD review markers, size-limited share
 copies, native file drag and drop, and signed one-click application updates.
@@ -18,12 +18,11 @@ and settings stay; the unsaved replay buffer starts fresh. Automatic checks can
 be disabled. A Git push alone does not publish an app update: the versioned
 GitHub Release must include the installer, signature, and `latest.json` feed.
 
-Original-file sharing works without extra tools. The 10/50/100 MB share-copy
-presets require the separately installed, approved FFmpeg/FFprobe pair described
-in [the dependency inventory](THIRD_PARTY_LICENSES.md). These binaries are not
-bundled. Windows publisher signing and clean-machine acceptance are separate
-release gates; broad hardware compatibility and eight-hour endurance are not
-claimed from local tests.
+The installer automatically downloads and verifies the approved sharing tools
+for 10/50/100 MB copies. No manual dependency installation or path configuration
+is needed. First setup requires internet (about 240 MB for sharing tools, plus
+WebView2 if missing). Publisher signing is absent; Windows may warn or block
+execution. Clean-machine and broad hardware acceptance remain unverified.
 
 ## Documentation
 
