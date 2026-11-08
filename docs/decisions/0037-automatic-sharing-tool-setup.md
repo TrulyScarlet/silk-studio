@@ -14,7 +14,10 @@ Both executable hashes remain the approved hashes recorded in the inventory.
 The publisher's LICENSE and README accompany the executables locally.
 
 Windows PowerShell 5.1 and .NET compression, included on supported Windows,
-download over HTTPS with a ten-minute deadline and 260 MB bound. Only four
+download over HTTPS with a ten-minute deadline and 260 MB bound. At most three attempts share that deadline,
+with fresh retry URLs to avoid cached expired CDN redirects. The child process
+uses native x64 Windows PowerShell and its own built-in module path, independent
+of any PowerShell 7 launcher environment. Only four
 fixed archive entries are extracted after archive verification. Executables
 are verified before replacing any installed pair. Valid installations are
 reused offline. Failed downloads/verification abort setup with an actionable

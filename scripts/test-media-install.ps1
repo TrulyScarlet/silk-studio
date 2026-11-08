@@ -12,6 +12,10 @@ function Run-Setup([string]$folder, [string]$archive, [int]$expectedExit) {
     if ($LASTEXITCODE -ne $expectedExit) { throw "Unexpected setup exit: $LASTEXITCODE (expected $expectedExit)" }
 }
 Run-Setup $validRoot $ArchivePath 0
+# Reproduce an installer launched with another PowerShell version's module path.
+$savedModules = $env:PSModulePath
+try { $env:PSModulePath = 'C:\nonexistent-module-path'; Run-Setup $validRoot $badArchive 0 }
+finally { $env:PSModulePath = $savedModules }
 # A valid installed pair must not download or read the supplied bad archive.
 Run-Setup $validRoot $badArchive 0
 Run-Setup $badRoot $badArchive 1

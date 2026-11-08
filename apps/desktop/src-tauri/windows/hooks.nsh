@@ -7,8 +7,7 @@
   DetailPrint "Preparing clip sharing tools. The first install downloads about 240 MB."
   ; NSIS is 32-bit. Use the native Windows PowerShell host on x64 Windows.
   StrCpy $1 "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
-  nsExec::ExecToLog '"$1" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\install-media-tools.ps1" -InstallDir "$INSTDIR"'
-  Pop $0
+  ExecWait '"$1" -WindowStyle Hidden -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\install-media-tools.ps1" -InstallDir "$INSTDIR"' $0
   ${If} $0 != 0
     MessageBox MB_ICONSTOP|MB_OK "Silk could not prepare its sharing tools. Check your internet connection and run setup again. Your settings and clips have not been removed." /SD IDOK
     SetErrorLevel 1

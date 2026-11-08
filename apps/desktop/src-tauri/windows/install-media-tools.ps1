@@ -5,6 +5,9 @@ param(
     [string]$ArchivePath
 )
 $ErrorActionPreference = 'Stop'
+# Launchers may be PowerShell 7 and pass incompatible module search paths.
+# Use only this Windows PowerShell host's built-in modules in this child process.
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 $ProgressPreference = 'SilentlyContinue'
 $expectedArchive = '2E8E28AF97C2AE338CCEF92E36DA9B2A4CD21D0CAD9DDE093545606CB07F5B00'
 $expected = @{
@@ -36,7 +39,12 @@ try {
         $client.Timeout = [TimeSpan]::FromMinutes(10)
         $cancel = [Threading.CancellationTokenSource]::new([TimeSpan]::FromMinutes(10))
         try {
-            $response = $client.GetAsync('https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build.zip', [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cancel.Token).GetAwaiter().GetResult()
+          for ($attempt = 0; $attempt -lt 3; $attempt++) {
+           try {
+            $url = 'https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build.zip'
+            # A fresh query avoids reusing a cached expired CDN redirect on retry.
+            if ($attempt -gt 0) { $url += '?silk_retry=' + [guid]::NewGuid().ToString('N') }
+            $response = $client.GetAsync($url, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cancel.Token).GetAwaiter().GetResult()
             $response.EnsureSuccessStatusCode() | Out-Null
             if ($response.Content.Headers.ContentLength -gt 260000000) { throw 'Sharing tools download is too large.' }
             $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
@@ -50,6 +58,14 @@ try {
                     $outputStream.Write($buffer, 0, $count)
                 }
             } finally { $outputStream.Dispose(); $inputStream.Dispose(); $response.Dispose() }
+            break
+           } catch {
+            if ($response) { $response.Dispose() }
+            if ($attempt -eq 2 -or $cancel.IsCancellationRequested) { throw }
+            Write-Output 'Download interrupted; retrying automatically...'
+            Start-Sleep -Seconds 2
+           }
+          }
         } finally { $client.Dispose(); $cancel.Dispose() }
     }
     if ((Get-FileHash -LiteralPath $ArchivePath).Hash -ne $expectedArchive) { throw 'Sharing tools archive verification failed.' }
@@ -74,6 +90,7 @@ try {
     }
     Write-Output 'Sharing tools installed and verified.'
 } catch {
+    [IO.File]::WriteAllText((Join-Path $root 'media-setup-error.txt'), $_.Exception.Message)
     Write-Error "Silk could not install its sharing tools. Check your internet connection and rerun setup. $($_.Exception.Message)" -ErrorAction Continue
     exit 1
 } finally {
