@@ -17,7 +17,7 @@ public static class SilkUpgradeWindow {
 $root=Split-Path -Parent $PSScriptRoot
 $installed=Join-Path $env:LOCALAPPDATA 'Silk\silk.exe'
 $baseline=Join-Path $root 'target\release\bundle\nsis\Silk_0.0.9_x64-setup.exe'
-$production=Join-Path $root 'target\release\bundle\nsis\Silk_0.1.0_x64-setup.exe'
+$production=Join-Path $root 'target\release\bundle\nsis\Silk_0.1.1_x64-setup.exe'
 $config=Join-Path $env:APPDATA 'dev.silk.project\config.json'
 $catalog=Join-Path (Split-Path $config) 'library.json'
 $mode=Join-Path $root 'target\updater-test-mode.txt'
@@ -98,7 +98,7 @@ Write-Output 'PASS: Corrupted installer rejected; current process and executable
 Invoke-Control 'Open Settings dialog'
 Invoke-Control 'System'
 Invoke-Control 'Check for updates'
-Wait-Until {(UI-Text) -match 'Silk 0.1.1 is available'} 'wrong-version manifest loaded'
+Wait-Until {(UI-Text) -match 'Silk 0.1.2 is available'} 'wrong-version manifest loaded'
 Invoke-Control 'Update & restart'
 Wait-Until {(UI-Text) -match 'Update verification failed'} 'signed version mismatch rejected'
 if((Silk-Process).Id -ne $baselinePid){throw 'Version mismatch restarted app'}
@@ -106,11 +106,11 @@ Write-Output 'PASS: Signed artifact with a mismatched announced version rejected
 
 'good' | Set-Content -LiteralPath $mode
 Invoke-Control 'Check for updates'
-Wait-Until {(UI-Text) -match 'Silk 0.1.0 is available'} 'valid update available'
+Wait-Until {(UI-Text) -match 'Silk 0.1.1 is available'} 'valid update available'
 Invoke-Control 'Update & restart'
 Wait-Until { $process=Silk-Process; $process -and $process.Id -ne $baselinePid -and (Find-Control 'Open Settings dialog') } 'automatic upgrade and restart' 120
 Show-Silk
-Wait-Until {(Get-Item -LiteralPath $installed).VersionInfo.ProductVersion -eq '0.1.0'} 'installed production version'
+Wait-Until {(Get-Item -LiteralPath $installed).VersionInfo.ProductVersion -eq '0.1.1'} 'installed production version'
 $after=Snapshot-Data
 foreach($path in $before.Keys){if($after[$path] -ne $before[$path]){throw "Data changed across upgrade: $path"}}
 if($after.Count -ne $before.Count){throw 'Clip file count changed across upgrade'}
@@ -119,4 +119,4 @@ foreach($name in @('config.json','library.json')){
     $backup=Join-Path (Split-Path $config) "update-backup\$name"
     if((Get-FileHash -LiteralPath $backup).Hash -ne $before[$original]){throw "Invalid upgrade backup: $name"}
 }
-Write-Output "PASS: 0.0.9 -> 0.1.0 downloaded, installed and restarted from one update action; all $($after.Count) data-file hashes and backups match."
+Write-Output "PASS: 0.0.9 -> 0.1.1 downloaded, installed and restarted from one update action; all $($after.Count) data-file hashes and backups match."

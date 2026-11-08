@@ -37,7 +37,9 @@ after producing its updater signature is invalid and must not be done.
 The updater test feature and insecure transport configuration are forbidden in
 public release builds. Unsigned artifacts are suitable for local testing only and
 must not be published as releases under the current project release policy,
-except for the explicitly authorized 0.1.0 release described in ADR 0036.
+except for the explicitly authorized 0.1.0 and 0.1.1 releases (ADRs 0036/0037).
+Build those releases with `scripts/build-release.ps1 -WithoutPublisherSignature`.
+Updater signatures are still required.
 
 ## Publishing an update
 
@@ -72,9 +74,10 @@ matched for settings, library metadata, and four saved MP4s. See ADR 0035 and
 `scripts/test-app-upgrade.ps1`. That test does not establish Authenticode, public
 GitHub/CDN delivery, clean-machine WebView2 bootstrap, or arbitrary GPU support.
 
-Original drag-and-drop sharing works without FFmpeg. Compressed 10/50/100 MB share
-copies require the separately installed exact FFmpeg/FFprobe pair recorded in
-THIRD_PARTY_LICENSES.md. These optional tools are not distributed in the installer.
+Starting with 0.1.1, NSIS automatically downloads and verifies the approved
+FFmpeg/FFprobe package directly from its publisher. No user tool installation
+is required. First setup needs internet; verified installed tools are reused.
+See ADR 0037 for archive verification, failure handling, and tests.
 
 `cargo audit` reports advisory warnings for older benchmark-only dependencies and
 non-Windows platform dependencies. Their paths and scope must be reviewed; a zero

@@ -2,6 +2,7 @@
 param(
     [switch]$Release,
     [switch]$RunAudits,
+    [switch]$WithoutPublisherSignature,
     [switch]$SkipMediaTools
 )
 
@@ -130,7 +131,10 @@ Require-Command "node" $Release | Out-Null
 Require-Command "npm" $Release | Out-Null
 Require-Command "cargo-tauri" $Release | Out-Null
 Require-Command "makensis" $Release | Out-Null
-Require-Command "signtool" $Release | Out-Null
+Require-Command "signtool" ($Release -and -not $WithoutPublisherSignature) | Out-Null
+if ($WithoutPublisherSignature -and $tauri.version -notin @('0.1.0', '0.1.1')) {
+    Add-Failure 'The publisher signing exception applies only to the authorized 0.1.0 and 0.1.1 releases.'
+}
 if ($Release -and [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
     Add-Failure 'TAURI_SIGNING_PRIVATE_KEY is required to sign updater artifacts.'
 }
@@ -141,7 +145,7 @@ $signingVariables = @(
 )
 foreach ($name in $signingVariables) {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-        if ($Release) {
+        if ($Release -and -not $WithoutPublisherSignature) {
             Add-Failure "Release signing variable '$name' is not configured; unsigned artifacts are not releasable."
         } else {
             Add-Warning "Release signing variable '$name' is not configured; this checkout cannot produce a signed release."
