@@ -45,7 +45,12 @@ function Invoke-Control([string]$Name) {
     $control=Find-Control $Name
     if (-not $control -or -not $control.Current.IsEnabled) {throw "Control unavailable: $Name"}
     $pattern=$null
-    if($control.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)){$pattern.Invoke()}
+    if($control.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)){
+        # The provider can block Invoke while NSIS installs prerequisites. Keep
+        # the test's timeout and process checks running on the calling thread.
+        if($Name -eq 'Update & restart') { Start-ThreadJob -ScriptBlock {param($action) $action.Invoke()} -ArgumentList $pattern | Out-Null }
+        else { $pattern.Invoke() }
+    }
     elseif($control.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$pattern)){$pattern.Expand()}
     else{throw "Control has no supported action: $Name"}
     Start-Sleep -Milliseconds 300
