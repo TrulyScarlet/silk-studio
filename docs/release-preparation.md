@@ -37,7 +37,7 @@ after producing its updater signature is invalid and must not be done.
 The updater test feature and insecure transport configuration are forbidden in
 public release builds. Unsigned artifacts are suitable for local testing only and
 must not be published as releases under the current project release policy,
-except for the explicitly authorized 0.1.0 and 0.1.1 releases (ADRs 0036/0037).
+except for the explicitly authorized 0.1.0, 0.1.1, and 0.1.2 releases (ADRs 0036/0037/0039).
 Build those releases with `scripts/build-release.ps1 -WithoutPublisherSignature`.
 Updater signatures are still required.
 
