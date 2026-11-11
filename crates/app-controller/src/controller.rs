@@ -160,6 +160,7 @@ pub struct Controller {
     save_metrics: SaveMetrics,
     reserved_paths: BTreeSet<PathBuf>,
     session_requested_fidelity: Option<VideoFidelityMode>,
+    settings_events: Vec<Vec<ControllerEvent>>,
 }
 
 impl Controller {
@@ -200,6 +201,7 @@ impl Controller {
             save_metrics: SaveMetrics::default(),
             reserved_paths: BTreeSet::new(),
             session_requested_fidelity: None,
+            settings_events: Vec::new(),
         }
     }
 
@@ -312,6 +314,30 @@ impl Controller {
         if settings.audio_bitrate_kbps == 0 {
             return Err("audio bitrate must be positive".to_string());
         }
+        let restart_source =
+            self.settings.source_name != settings.source_name && self.state().is_active();
+        if restart_source {
+            // Bound outstanding settings transitions until the UI event pump
+            // drains them; keep accepted clip-save completion events intact.
+            if self.settings_events.len() >= 4 {
+                return Err("capture settings are still being applied; try again shortly".into());
+            }
+            let previous = self.settings.clone();
+            let mut events = self.stop();
+            self.settings = settings;
+            events.extend(self.start());
+            if self.engine.is_none() {
+                self.settings = previous;
+                events.extend(self.start());
+                self.settings_events.push(events);
+                return Err(
+                    "could not start the selected capture source; restored previous settings"
+                        .into(),
+                );
+            }
+            self.settings_events.push(events);
+            return Ok(());
+        }
         if let Some(engine) = self.engine.as_mut() {
             engine
                 .set_replay_retention_ms(settings.retention_ms)
@@ -335,10 +361,14 @@ impl Controller {
     /// Drain pending engine transitions without executing a command (the
     /// UI bridge calls this on its event timer). Emits StatusChanged etc.
     pub fn poll(&mut self) -> Vec<ControllerEvent> {
-        let mut events = match self.engine.as_mut() {
+        let mut events: Vec<_> = std::mem::take(&mut self.settings_events)
+            .into_iter()
+            .flatten()
+            .collect();
+        events.extend(match self.engine.as_mut() {
             None => Vec::new(),
             Some(engine) => map_engine_events(engine.pump()),
-        };
+        });
         let save_results = self
             .save_worker
             .as_ref()
@@ -1131,6 +1161,82 @@ mod tests {
     use test_support::TempDir;
 
     struct TestGpuResolver;
+
+    #[test]
+    fn source_changes_restart_live_capture_and_restore_on_start_failure() {
+        struct SourceCapture {
+            inner: ScriptedVideoCapture,
+            sources: Arc<Mutex<Vec<String>>>,
+        }
+        impl VideoCapture for SourceCapture {
+            fn enumerate_sources(&self) -> capture_api::Result<Vec<media_types::VideoSourceInfo>> {
+                self.inner.enumerate_sources()
+            }
+            fn start(&mut self, config: VideoCaptureConfig) -> capture_api::Result<()> {
+                self.sources.lock().unwrap().push(config.source_id.clone());
+                if config.source_id == "missing" {
+                    return Err(VideoCaptureError::SourceUnavailable);
+                }
+                self.inner.start(config)
+            }
+            fn next_event(&mut self) -> capture_api::Result<VideoCaptureEvent> {
+                self.inner.next_event()
+            }
+            fn stop(&mut self) -> capture_api::Result<()> {
+                self.inner.stop()
+            }
+        }
+        let dir = TempDir::new("live-source-change").unwrap();
+        let sources = Arc::new(Mutex::new(Vec::new()));
+        let factory_sources = sources.clone();
+        let factory: DepsFactory = Box::new(move || {
+            (
+                Box::new(SourceCapture {
+                    inner: ScriptedVideoCapture::new(Vec::new()).with_continuous_frames(),
+                    sources: factory_sources.clone(),
+                }),
+                Box::new(MockVideoEncoder::new()),
+                Box::new(MockMuxer::default()),
+            )
+        });
+        let mut settings = ControllerSettings {
+            output_dir: dir.path().into(),
+            ..ControllerSettings::default()
+        };
+        let sink = Arc::new(super::super::notification::CollectingNotificationSink::new());
+        let mut controller = Controller::with_settings(factory, sink, settings.clone());
+        controller.start();
+        settings.retention_ms += 100;
+        controller.update_settings(settings.clone()).unwrap();
+        assert_eq!(
+            sources.lock().unwrap().len(),
+            1,
+            "retention must not reset capture"
+        );
+        settings.source_name = "display-2".into();
+        controller.update_settings(settings.clone()).unwrap();
+        assert_eq!(*sources.lock().unwrap(), ["display-1", "display-2"]);
+        assert!(controller.state().is_active());
+        assert!(controller.poll().iter().any(
+            |event| matches!(event, ControllerEvent::StatusChanged { state } if state == "Stopped")
+        ));
+        settings.source_name = "missing".into();
+        assert!(controller.update_settings(settings.clone()).is_err());
+        assert_eq!(controller.settings.source_name, "display-2");
+        assert_eq!(
+            *sources.lock().unwrap(),
+            ["display-1", "display-2", "missing", "display-2"]
+        );
+        assert!(controller.state().is_active());
+        controller.stop();
+        settings.source_name = "display-3".into();
+        controller.update_settings(settings).unwrap();
+        assert_eq!(
+            sources.lock().unwrap().len(),
+            4,
+            "editing a stopped session must not start it"
+        );
+    }
     impl encoder_api::GpuFrameResolver for TestGpuResolver {
         fn resolve(
             &self,

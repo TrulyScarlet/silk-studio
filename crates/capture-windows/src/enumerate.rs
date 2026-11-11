@@ -316,6 +316,11 @@ pub fn enumerate_adapters() -> CaptureResult<Vec<GraphicsAdapterInfo>> {
 /// DXGI output plus raw HMONITOR handle.
 pub(crate) fn resolve_source(source_id: &str) -> CaptureResult<(IDXGIOutput, isize)> {
     let factory = factory()?;
+    let automatic_monitor = source_id
+        .trim()
+        .eq_ignore_ascii_case("auto")
+        .then(foreground_monitor)
+        .flatten();
     let mut fallback: Option<(IDXGIOutput, isize)> = None;
     let mut first_output: Option<(IDXGIOutput, isize)> = None;
     let mut adapter_index = 0_u32;
@@ -335,6 +340,9 @@ pub(crate) fn resolve_source(source_id: &str) -> CaptureResult<(IDXGIOutput, isi
                     .collect::<Vec<_>>(),
             );
             let handle = desc.Monitor.0 as isize;
+            if automatic_monitor == Some(handle) {
+                return Ok((output, handle));
+            }
             if first_output.is_none() {
                 first_output = Some((output.clone(), handle));
             }
@@ -363,4 +371,25 @@ pub(crate) fn resolve_source(source_id: &str) -> CaptureResult<(IDXGIOutput, isi
         }
     }
     Err(VideoCaptureError::SourceUnavailable)
+}
+
+/// Ignore Silk itself so opening its settings does not move an Auto capture.
+pub(crate) fn foreground_monitor() -> Option<isize> {
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+    };
+    unsafe {
+        let window = GetForegroundWindow();
+        if window.0.is_null() || IsIconic(window).as_bool() {
+            return None;
+        }
+        let mut process = 0;
+        GetWindowThreadProcessId(window, Some(&mut process));
+        if process == 0 || process == std::process::id() {
+            return None;
+        }
+        let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
+        (!monitor.0.is_null()).then_some(monitor.0 as isize)
+    }
 }

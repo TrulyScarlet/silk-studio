@@ -919,6 +919,95 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires a hardware D3D11 video device"]
+    fn native_conversion_preserves_visible_pixels_at_native_resolution() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D11::*;
+        let mut device = None;
+        let mut context = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_FLAG(
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 | D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0,
+                ),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+            .unwrap();
+        }
+        let device = Arc::new(GpuDeviceContext::new(device.unwrap(), context.unwrap()));
+        for binding in [
+            D3D11_BIND_RENDER_TARGET.0,
+            D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0,
+        ] {
+            let pixels = vec![255_u8; 64 * 64 * 4];
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: 64,
+                Height: 64,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: binding as u32,
+                ..Default::default()
+            };
+            let initial = D3D11_SUBRESOURCE_DATA {
+                pSysMem: pixels.as_ptr().cast(),
+                SysMemPitch: 256,
+                SysMemSlicePitch: 16384,
+            };
+            let mut texture = None;
+            unsafe {
+                device
+                    .device
+                    .CreateTexture2D(&desc, Some(&initial), Some(&mut texture))
+                    .unwrap();
+            }
+            let slot = GpuTextureSlot::new(texture.unwrap(), device.clone());
+            let converter = D3D11VideoConverter::new(device.clone(), 64, 64, 64, 64, 60).unwrap();
+            let output = converter.convert(&slot).unwrap();
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe {
+                output.texture.GetDesc(&mut desc);
+            }
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            desc.MiscFlags = 0;
+            let mut staging = None;
+            unsafe {
+                device
+                    .device
+                    .CreateTexture2D(&desc, None, Some(&mut staging))
+                    .unwrap();
+            }
+            let staging = staging.unwrap();
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            unsafe {
+                device.context.CopyResource(&staging, &output.texture);
+                device
+                    .context
+                    .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                    .unwrap();
+                let y = *(mapped.pData as *const u8).add(32 * mapped.RowPitch as usize + 32);
+                device.context.Unmap(&staging, 0);
+                assert!(y >= 230, "white input became Y={y}, binding={binding}");
+            }
+        }
+    }
+
+    #[test]
     fn warp_readback_preserves_colors_scales_and_reuses_staging() {
         use windows::Win32::Foundation::HMODULE;
         use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;

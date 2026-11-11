@@ -217,6 +217,9 @@ fn assert_bitstream_decodes(packets: &[media_types::EncodedPacket]) {
         .flat_map(|packet| packet.payload.as_slice().iter().copied())
         .collect();
     std::fs::write(&path, bytes).unwrap();
+    if let Some(destination) = std::env::var_os("SILK_TEST_BITSTREAM") {
+        std::fs::copy(&path, destination).unwrap();
+    }
     let result = std::process::Command::new(ffmpeg)
         .args(["-v", "error", "-xerror", "-f", "h264", "-i"])
         .arg(&path)
@@ -236,17 +239,29 @@ fn assert_bitstream_decodes(packets: &[media_types::EncodedPacket]) {
 }
 
 fn encode_with_preference(
-    config: VideoEncoderConfig,
+    mut config: VideoEncoderConfig,
     mut capture: Box<dyn VideoCapture>,
     frame_count: u32,
     preference: EncoderPreference,
 ) -> (u32, Vec<media_types::EncodedPacket>) {
     let sources = enumerate_displays().expect("enumeration");
+    let requested_source = std::env::var("SILK_TEST_SOURCE").ok();
     let primary = sources
         .iter()
-        .find(|source| source.is_primary)
-        .expect("primary display");
+        .find(|source| {
+            requested_source
+                .as_ref()
+                .map_or(source.is_primary, |id| &source.id == id)
+        })
+        .expect("requested display");
 
+    if std::env::var_os("SILK_TEST_NATIVE_SIZE").is_some() {
+        config.width = primary.width;
+        config.height = primary.height;
+    }
+    if std::env::var_os("SILK_TEST_DXGI").is_some() {
+        capture = Box::new(capture_windows::DxgiDisplayCapture::new(StreamId(0)));
+    }
     capture
         .start(VideoCaptureConfig {
             source_id: primary.id.clone(),
@@ -269,9 +284,23 @@ fn encode_with_preference(
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut frames = 0_u32;
     let mut packets = Vec::new();
+    let mut dumped = false;
     while Instant::now() < deadline && frames < frame_count {
         match capture.next_event() {
             Ok(VideoCaptureEvent::Frame(frame)) => {
+                if !dumped {
+                    if let Some(destination) = std::env::var_os("SILK_TEST_RAW_BGRA") {
+                        let context = capture.gpu_frame_context().unwrap();
+                        if let Ok(lease) = context.resolve(&frame) {
+                            let slot = lease.downcast_ref::<gpu_windows::GpuTextureSlot>().unwrap();
+                            let bytes = gpu_windows::BgraReadback::default()
+                                .read_scaled(slot, 640, 360)
+                                .unwrap();
+                            std::fs::write(destination, bytes).unwrap();
+                            dumped = true;
+                        }
+                    }
+                }
                 packets.extend(encoder.encode(frame).expect("encode WGC GPU frame"));
                 frames += 1;
             }

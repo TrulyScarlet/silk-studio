@@ -6,6 +6,39 @@ use media_types::StreamId;
 use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Direct3D11::*;
 
+#[test]
+#[ignore = "requires interactive desktop and a working Windows capture backend"]
+fn auto_reports_actual_dimensions_before_delivering_video() {
+    let mut capture = DisplayCapture::new(StreamId(0));
+    capture
+        .start(VideoCaptureConfig {
+            source_id: "auto".into(),
+            target_fps: 60,
+        })
+        .unwrap();
+    let (width, height) = match capture.next_event().unwrap() {
+        VideoCaptureEvent::FormatChanged { width, height } => (width, height),
+        _ => panic!("Auto must announce selected monitor dimensions before frames"),
+    };
+    assert!(width > 0 && height > 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut received = false;
+    while Instant::now() < deadline {
+        match capture.next_event().unwrap() {
+            VideoCaptureEvent::Frame(frame) => {
+                assert_eq!((frame.width, frame.height), (width, height));
+                assert!(capture.gpu_frame_context().unwrap().resolve(&frame).is_ok());
+                received = true;
+                break;
+            }
+            VideoCaptureEvent::SourceLost => panic!("foreground display changed during test"),
+            _ => {}
+        }
+    }
+    capture.stop().unwrap();
+    assert!(received, "Auto did not deliver video");
+}
+
 fn readback(slot: &GpuTextureSlot) -> Vec<u8> {
     unsafe {
         let mut desc = D3D11_TEXTURE2D_DESC::default();

@@ -43,8 +43,8 @@ pub struct CaptureSettings {
 impl Default for CaptureSettings {
     fn default() -> Self {
         Self {
-            source_type: "display".to_string(),
-            source_id: "display-1".to_string(),
+            source_type: "game".to_string(),
+            source_id: "auto".to_string(),
             frame_rate: 60,
             output_resolution: OutputResolution::Native,
         }
