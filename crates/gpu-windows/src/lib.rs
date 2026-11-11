@@ -38,6 +38,110 @@ use windows::Win32::Graphics::Dxgi::Common::{
 
 pub mod evidence;
 
+/// Bounded, reusable CPU readback for encoders that cannot accept DXGI surfaces.
+/// Owned and called by the encoding worker, never by capture or UI callbacks.
+#[derive(Default)]
+pub struct BgraReadback {
+    staging: Option<ID3D11Texture2D>,
+    dimensions: (u32, u32),
+    device: Option<Arc<GpuDeviceContext>>,
+}
+
+impl BgraReadback {
+    pub fn read_scaled(
+        &mut self,
+        slot: &GpuTextureSlot,
+        width: u32,
+        height: u32,
+    ) -> windows::core::Result<Vec<u8>> {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_USAGE_STAGING,
+        };
+        let dimensions = slot.dimensions();
+        if width == 0
+            || height == 0
+            || width > 7680
+            || height > 4320
+            || dimensions.0 == 0
+            || dimensions.1 == 0
+            || dimensions.0 > 7680
+            || dimensions.1 > 4320
+        {
+            return Err(windows::core::Error::from_hresult(
+                windows::Win32::Foundation::E_INVALIDARG,
+            ));
+        }
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            slot.texture.GetDesc(&mut desc);
+        }
+        if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+            || desc.MipLevels != 1
+            || desc.ArraySize != 1
+            || desc.SampleDesc.Count != 1
+        {
+            return Err(windows::core::Error::from_hresult(
+                windows::Win32::Foundation::E_INVALIDARG,
+            ));
+        }
+        if self.staging.is_none()
+            || self.dimensions != dimensions
+            || self
+                .device
+                .as_ref()
+                .is_none_or(|device| !Arc::ptr_eq(device, slot.device_context()))
+        {
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            desc.MiscFlags = 0;
+            unsafe {
+                slot.device_context
+                    .device
+                    .CreateTexture2D(&desc, None, Some(&mut self.staging))?;
+            }
+            self.dimensions = dimensions;
+            self.device = Some(slot.device_context.clone());
+        }
+        let staging = self.staging.as_ref().expect("created staging texture");
+        let context = &slot.device_context.context;
+        let mut output = vec![0; width as usize * height as usize * 4];
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            context.CopyResource(staging, &slot.texture);
+            context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            if mapped.pData.is_null() || mapped.RowPitch < dimensions.0 * 4 {
+                context.Unmap(staging, 0);
+                return Err(windows::core::Error::from_hresult(
+                    windows::Win32::Foundation::E_FAIL,
+                ));
+            }
+            // Copy only visible pixels; RowPitch includes driver-owned padding.
+            for y in 0..height as usize {
+                let source_y = y * dimensions.1 as usize / height as usize;
+                if width == dimensions.0 {
+                    let source =
+                        (mapped.pData as *const u8).add(source_y * mapped.RowPitch as usize);
+                    let destination = y * width as usize * 4;
+                    output[destination..destination + width as usize * 4]
+                        .copy_from_slice(std::slice::from_raw_parts(source, width as usize * 4));
+                    continue;
+                }
+                for x in 0..width as usize {
+                    let source_x = x * dimensions.0 as usize / width as usize;
+                    let source = (mapped.pData as *const u8)
+                        .add(source_y * mapped.RowPitch as usize + source_x * 4);
+                    let destination = (y * width as usize + x) * 4;
+                    output[destination..destination + 4]
+                        .copy_from_slice(std::slice::from_raw_parts(source, 4));
+                }
+            }
+            context.Unmap(staging, 0);
+        }
+        Ok(output)
+    }
+}
+
 /// A D3D11 device and immediate context that are protected for concurrent use.
 ///
 /// The capture backend enables `ID3D11Multithread` protection before publishing
@@ -813,6 +917,82 @@ fn validate_dimensions(width: u32, height: u32) -> Result<(), GpuMediaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warp_readback_preserves_colors_scales_and_reuses_staging() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+            D3D11_SUBRESOURCE_DATA,
+        };
+        let mut device = None;
+        let mut context = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+            .unwrap();
+        }
+        let device = Arc::new(GpuDeviceContext::new(device.unwrap(), context.unwrap()));
+        // Two BGRA rows with four bytes of padding after each visible row.
+        let pixels = [
+            0, 0, 255, 255, 0, 255, 0, 255, 99, 99, 99, 99, 255, 0, 0, 255, 255, 255, 255, 255, 99,
+            99, 99, 99,
+        ];
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: 2,
+            Height: 2,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            ..Default::default()
+        };
+        let initial = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: 12,
+            SysMemSlicePitch: 24,
+        };
+        let mut texture = None;
+        unsafe {
+            device
+                .device
+                .CreateTexture2D(&desc, Some(&initial), Some(&mut texture))
+                .unwrap();
+        }
+        let slot = GpuTextureSlot::new(texture.unwrap(), device);
+        let mut readback = BgraReadback::default();
+        let native = readback.read_scaled(&slot, 2, 2).unwrap();
+        assert_eq!(
+            native,
+            [0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, 255, 255, 255, 255]
+        );
+        let scaled = readback.read_scaled(&slot, 4, 4).unwrap();
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(
+                    &scaled[(y * 4 + x) * 4..(y * 4 + x + 1) * 4],
+                    &native[((y / 2) * 2 + x / 2) * 4..((y / 2) * 2 + x / 2 + 1) * 4]
+                );
+            }
+        }
+        assert_eq!(readback.read_scaled(&slot, 1, 1).unwrap(), pixels[..4]);
+        assert!(readback.read_scaled(&slot, 0, 2).is_err());
+        assert!(readback.read_scaled(&slot, 7681, 2).is_err());
+    }
 
     #[test]
     fn bt709_conversion_uses_full_rgb_and_limited_nv12_ranges() {

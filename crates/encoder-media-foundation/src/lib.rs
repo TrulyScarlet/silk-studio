@@ -20,7 +20,7 @@ use encoder_api::{
     EncoderCandidate, EncoderCapabilities, EncoderError, EncoderPreference, GpuFrameResolveError,
     Result, VideoEncoder, VideoEncoderConfig, VideoEncoderFactory,
 };
-use gpu_windows::{D3D11VideoConverter, GpuDeviceContext, GpuTextureSlot};
+use gpu_windows::{BgraReadback, D3D11VideoConverter, GpuDeviceContext, GpuTextureSlot};
 use media_types::{
     EncodedPacket, FramePayload, MediaType, PacketPayload, PixelFormat, StreamId, TimeBase,
     VideoFrame,
@@ -415,6 +415,7 @@ struct MediaFoundationVideoEncoder {
     output_info: Option<MFT_OUTPUT_STREAM_INFO>,
     gpu_context: Option<encoder_api::GpuFrameContext>,
     gpu_device: Option<Arc<GpuDeviceContext>>,
+    cpu_readback: BgraReadback,
     gpu_converter: Option<D3D11VideoConverter>,
     gpu_converter_input: Option<(u32, u32)>,
     dxgi_device_manager: Option<IMFDXGIDeviceManager>,
@@ -452,6 +453,7 @@ impl MediaFoundationVideoEncoder {
             output_info: None,
             gpu_context: None,
             gpu_device: None,
+            cpu_readback: BgraReadback::default(),
             gpu_converter: None,
             gpu_converter_input: None,
             dxgi_device_manager: None,
@@ -583,10 +585,11 @@ impl MediaFoundationVideoEncoder {
                 let _ = codec_api.SetValue(&CODECAPI_AVEncMPVGOPSize, &gop_variant);
             }
 
-            // Soft-configure CODECAPI_AVEncH264CABACEnable (VARIANT_TRUE for H.264).
+            // Keep software H.264 on the default CAVLC compatibility path;
+            // request CABAC only for hardware backends.
             let normalized_codec = encoder_api::normalize_codec(&self.capabilities.codec);
             if normalized_codec == "avc" || normalized_codec == "h264" {
-                let cabac_variant = VARIANT::from(true);
+                let cabac_variant = VARIANT::from(self.capabilities.hardware_accelerated);
                 unsafe {
                     let _ = codec_api.SetValue(&CODECAPI_AVEncH264CABACEnable, &cabac_variant);
                 }
@@ -598,8 +601,12 @@ impl MediaFoundationVideoEncoder {
                 let _ = codec_api.SetValue(&CODECAPI_AVEncVideoContentType, &content_type_variant);
             }
 
-            // Soft-configure CODECAPI_AVEncCommonQualityVsSpeed (100).
-            let quality_variant = VARIANT::from(100u32);
+            // Software fallback prioritizes speed over maximum complexity.
+            let quality_variant = VARIANT::from(if self.capabilities.hardware_accelerated {
+                100u32
+            } else {
+                33u32
+            });
             unsafe {
                 let _ = codec_api.SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &quality_variant);
             }
@@ -620,12 +627,9 @@ impl MediaFoundationVideoEncoder {
             .unwrap_or(0)
             != 0;
         if !d3d11_aware {
-            return Err(EncoderError::UnsupportedConfiguration {
-                reason: format!(
-                    "MFT '{}' does not advertise MF_SA_D3D11_AWARE",
-                    self.capabilities.backend_name
-                ),
-            });
+            // System-memory MFTs can still encode captured GPU frames through
+            // worker-owned readback; do not send them a DXGI device manager.
+            return Ok(());
         }
         let mut reset_token = 0_u32;
         let mut manager = None;
@@ -781,6 +785,18 @@ impl MediaFoundationVideoEncoder {
                 "convert GPU frame",
                 "DXGI device manager is not configured",
             ));
+        }
+        if self.dxgi_device_manager.is_none() {
+            let bgra = self
+                .cpu_readback
+                .read_scaled(&slot, config.width, config.height)
+                .map_err(|error| encode_error("read GPU frame for CPU encoder", error))?;
+            let bytes = if config.pixel_format == PixelFormat::Ayuv {
+                convert_bgra_to_ayuv(&bgra, config.width, config.height, false)?
+            } else {
+                convert_to_nv12(&bgra, PixelFormat::Bgra8, config.width, config.height)?
+            };
+            return self.make_input_sample(&bytes, frame).map(Some);
         }
         if self.gpu_converter_input != Some(input_dimensions) {
             self.gpu_converter = None;
@@ -1148,6 +1164,7 @@ impl VideoEncoder for MediaFoundationVideoEncoder {
         }
         self.gpu_context = context.clone();
         self.gpu_device = None;
+        self.cpu_readback = BgraReadback::default();
         self.gpu_converter = None;
         self.gpu_converter_input = None;
         if let Some(context) = context {
@@ -1275,6 +1292,7 @@ impl VideoEncoder for MediaFoundationVideoEncoder {
         self.started = false;
         self.gpu_context = None;
         self.gpu_device = None;
+        self.cpu_readback = BgraReadback::default();
         self.gpu_converter = None;
         self.gpu_converter_input = None;
         self.async_input_ready = false;

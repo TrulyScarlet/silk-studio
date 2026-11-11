@@ -485,6 +485,11 @@ impl AudioEncoderConfig {
 /// H.264 video encoding contract. `encode` consumes frames on the
 /// dedicated encoding worker thread only (spec §14).
 pub trait VideoEncoder: Send {
+    /// Actual configured codec, when the backend can report it. Capabilities
+    /// alone may be placeholders before configuration or describe other modes.
+    fn active_codec(&self) -> Option<String> {
+        None
+    }
     fn capabilities(&self) -> EncoderCapabilities;
     fn configure(&mut self, config: VideoEncoderConfig) -> Result<()>;
 
@@ -662,7 +667,9 @@ impl FallbackVideoEncoder {
         if let Some(context) = self.gpu_context.clone() {
             encoder.set_gpu_frame_context(Some(context))?;
         }
-        encoder.configure(config.clone())?;
+        let mut candidate_config = config.clone();
+        candidate_config.codec = candidate.capabilities.codec.clone();
+        encoder.configure(candidate_config)?;
         Ok(encoder)
     }
 
@@ -702,6 +709,11 @@ impl FallbackVideoEncoder {
 }
 
 impl VideoEncoder for FallbackVideoEncoder {
+    fn active_codec(&self) -> Option<String> {
+        self.active
+            .as_ref()
+            .map(|encoder| encoder.capabilities().codec)
+    }
     fn capabilities(&self) -> EncoderCapabilities {
         self.active_backend()
             .or_else(|| {
@@ -717,8 +729,19 @@ impl VideoEncoder for FallbackVideoEncoder {
         self.config = Some(config.clone());
         self.active = None;
         self.active_index = None;
-        self.candidates =
-            rank_encoder_candidates(&self.factory.discover()?, &config, self.preference);
+        let discovered = self.factory.discover()?;
+        self.candidates = rank_encoder_candidates(&discovered, &config, self.preference);
+        // Keep the requested codec first. Auto can recover to H.264 even when
+        // an optional codec is enumerated but fails at configuration or runtime.
+        if self.preference == EncoderPreference::Auto && !is_same_codec(&config.codec, "avc") {
+            let mut compatibility_config = config.clone();
+            compatibility_config.codec = "avc".into();
+            self.candidates.extend(rank_encoder_candidates(
+                &discovered,
+                &compatibility_config,
+                self.preference,
+            ));
+        }
         if self.candidates.is_empty() {
             return Err(EncoderError::InitializationFailed {
                 backend: "selection".to_string(),
@@ -773,7 +796,10 @@ impl VideoEncoder for FallbackVideoEncoder {
             match result {
                 Ok(packets) => {
                     self.update_latency(started);
-                    self.metrics.frames_encoded += 1;
+                    self.metrics.frames_encoded = self
+                        .metrics
+                        .frames_encoded
+                        .saturating_add(packets.len() as u64);
                     self.metrics.active_backend = Some(backend);
                     self.active = Some(active);
                     return Ok(packets);
@@ -864,6 +890,12 @@ impl VideoEncoder for FallbackVideoEncoder {
             return Err(EncoderError::NotConfigured);
         };
         let result = active.drain();
+        if let Ok(packets) = &result {
+            self.metrics.frames_encoded = self
+                .metrics
+                .frames_encoded
+                .saturating_add(packets.len() as u64);
+        }
         if result.is_ok() {
             active.set_gpu_frame_context(None)?;
             self.gpu_context = None;
@@ -1184,6 +1216,12 @@ mod tests {
 
         fn configure(&mut self, config: VideoEncoderConfig) -> Result<()> {
             config.validate()?;
+            assert!(is_same_codec(&config.codec, &self.capabilities.codec));
+            if self.capabilities.backend_name == "reject-configuration" {
+                return Err(EncoderError::UnsupportedConfiguration {
+                    reason: "test rejection".into(),
+                });
+            }
             self.configured = true;
             Ok(())
         }
@@ -1229,6 +1267,94 @@ mod tests {
 
     struct FakeFactory {
         candidates: Vec<EncoderCandidate>,
+    }
+
+    #[test]
+    fn optional_codec_falls_back_on_absence_configuration_and_runtime_failure() {
+        for requested_codec in ["av1", "hevc"] {
+            for failure in ["absent", "configuration", "runtime"] {
+                let h264 = candidate("software", "software-h264", false);
+                let mut candidates = vec![h264];
+                if failure != "absent" {
+                    let mut optional = candidate(
+                        if failure == "runtime" {
+                            "hardware"
+                        } else {
+                            "av1"
+                        },
+                        if failure == "configuration" {
+                            "reject-configuration"
+                        } else {
+                            "intel-av1"
+                        },
+                        true,
+                    );
+                    optional.capabilities.codec = requested_codec.into();
+                    candidates.push(optional);
+                }
+                let mut encoder = FallbackVideoEncoder::new(
+                    Box::new(FakeFactory { candidates }),
+                    EncoderPreference::Auto,
+                );
+                encoder
+                    .configure(VideoEncoderConfig {
+                        codec: requested_codec.into(),
+                        ..VideoEncoderConfig::default()
+                    })
+                    .unwrap();
+                let packets = encoder
+                    .encode(VideoFrame {
+                        stream_id: StreamId(0),
+                        width: 1920,
+                        height: 1080,
+                        pixel_format: PixelFormat::Nv12,
+                        pts: 1234,
+                        time_base: TimeBase::MILLISECOND,
+                        payload: FramePayload::Cpu(Arc::from(&[0_u8; 6][..])),
+                    })
+                    .unwrap();
+                assert!(
+                    is_same_codec(&encoder.capabilities().codec, "avc"),
+                    "{failure}"
+                );
+                assert_eq!(packets[0].pts, 1234, "fallback must preserve frame timing");
+            }
+        }
+    }
+
+    #[test]
+    fn available_requested_codec_is_preferred_over_compatibility_codec() {
+        let mut optional = candidate("optional", "intel-av1", true);
+        optional.capabilities.codec = "av1".into();
+        let mut encoder = FallbackVideoEncoder::new(
+            Box::new(FakeFactory {
+                candidates: vec![candidate("h264", "nvidia-h264", true), optional],
+            }),
+            EncoderPreference::Auto,
+        );
+        encoder
+            .configure(VideoEncoderConfig {
+                codec: "av1".into(),
+                ..VideoEncoderConfig::default()
+            })
+            .unwrap();
+        assert_eq!(encoder.active_codec().as_deref(), Some("av1"));
+    }
+
+    #[test]
+    fn explicit_hardware_policy_does_not_enable_software_or_codec_fallback() {
+        let mut encoder = FallbackVideoEncoder::new(
+            Box::new(FakeFactory {
+                candidates: vec![candidate("software", "software-h264", false)],
+            }),
+            EncoderPreference::HardwareOnly,
+        );
+        assert!(encoder
+            .configure(VideoEncoderConfig {
+                codec: "av1".into(),
+                ..VideoEncoderConfig::default()
+            })
+            .is_err());
     }
 
     impl VideoEncoderFactory for FakeFactory {
@@ -1334,6 +1460,7 @@ mod tests {
             .expect("a dropped frame is not an encoder failure")
             .is_empty());
         assert_eq!(encoder.metrics().frames_dropped, 1);
+        assert_eq!(encoder.metrics().frames_encoded, 0);
         assert_eq!(encoder.metrics().fallback_count, 0);
     }
 

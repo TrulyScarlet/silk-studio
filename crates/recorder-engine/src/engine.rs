@@ -1079,7 +1079,7 @@ fn run_video_worker(
                     Ok(packets) => {
                         if let Some(message) = sync_encoder_epoch(
                             &buffer,
-                            &stream_descriptor,
+                            &mut stream_descriptor,
                             encoder,
                             &mut encoder_epoch,
                             &mut primed_reported,
@@ -1120,7 +1120,7 @@ fn run_video_worker(
                     Err(err) => {
                         let _ = sync_encoder_epoch(
                             &buffer,
-                            &stream_descriptor,
+                            &mut stream_descriptor,
                             encoder,
                             &mut encoder_epoch,
                             &mut primed_reported,
@@ -1675,7 +1675,7 @@ fn insert_packets(
 
 fn sync_encoder_epoch(
     buffer: &SharedBuffer,
-    descriptor: &StreamDescriptor,
+    descriptor: &mut StreamDescriptor,
     encoder: &dyn VideoEncoder,
     encoder_epoch: &mut u64,
     primed_reported: &mut bool,
@@ -1684,6 +1684,10 @@ fn sync_encoder_epoch(
     if current_epoch == *encoder_epoch {
         return None;
     }
+    if let Some(codec) = encoder.active_codec() {
+        descriptor.codec = codec;
+    }
+    descriptor.extradata = None;
     let result = reset_video_buffer_epoch(buffer, descriptor);
     if result.is_ok() {
         *encoder_epoch = current_epoch;
@@ -1699,6 +1703,23 @@ fn publish_video_extradata(
     descriptor: &mut StreamDescriptor,
     encoder: &dyn VideoEncoder,
 ) -> Option<String> {
+    if let Some(actual_codec) = encoder
+        .active_codec()
+        .filter(|codec| !encoder_api::is_same_codec(&descriptor.codec, codec))
+    {
+        diagnostics::warn(
+            "encoder",
+            &format!(
+                "requested codec {} unavailable; using {}",
+                descriptor.codec, actual_codec
+            ),
+        );
+        descriptor.codec = actual_codec;
+        descriptor.extradata = None;
+        if let Err(message) = update_registered_video_descriptor(buffer, descriptor) {
+            return Some(message);
+        }
+    }
     let extradata = encoder.codec_extradata()?;
     if descriptor.extradata.as_ref() == Some(&extradata) {
         return None;
@@ -1867,6 +1888,91 @@ mod tests {
         configured_codec: Option<String>,
         epoch: u64,
         extradata: Option<PacketPayload>,
+    }
+
+    #[test]
+    fn codec_fallback_starts_clean_replay_epoch_with_actual_codec() {
+        struct SwitchingEncoder {
+            frames: u64,
+        }
+        impl VideoEncoder for SwitchingEncoder {
+            fn capabilities(&self) -> EncoderCapabilities {
+                MockAv1EncoderWithAvcCapabilities::new().capabilities()
+            }
+            fn active_codec(&self) -> Option<String> {
+                Some(if self.frames < 2 { "av1" } else { "avc" }.into())
+            }
+            fn configure(&mut self, _: VideoEncoderConfig) -> encoder_api::Result<()> {
+                Ok(())
+            }
+            fn epoch(&self) -> u64 {
+                u64::from(self.frames >= 2)
+            }
+            fn codec_extradata(&self) -> Option<PacketPayload> {
+                Some(PacketPayload::from(vec![if self.frames < 2 {
+                    1
+                } else {
+                    2
+                }]))
+            }
+            fn encode(&mut self, frame: VideoFrame) -> encoder_api::Result<Vec<EncodedPacket>> {
+                self.frames += 1;
+                Ok(vec![EncodedPacket {
+                    stream_id: frame.stream_id,
+                    media_type: MediaType::Video,
+                    pts: frame.pts,
+                    dts: frame.pts,
+                    duration: 33,
+                    time_base: frame.time_base,
+                    is_keyframe: true,
+                    sequence: 0,
+                    payload: PacketPayload::from(vec![0, 0, 0, 1, 0x65]),
+                }])
+            }
+            fn drain(&mut self) -> encoder_api::Result<Vec<EncodedPacket>> {
+                Ok(Vec::new())
+            }
+        }
+        let mut engine = RecorderEngine::new(
+            EngineConfig {
+                retention_ms: 1,
+                video_encoder: VideoEncoderConfig {
+                    codec: "av1".into(),
+                    ..VideoEncoderConfig::default()
+                },
+                ..EngineConfig::default()
+            },
+            Box::new(TwoFrameCapture::with_frame_count(3)),
+            Box::new(SwitchingEncoder { frames: 0 }),
+            Box::new(EngineTestMuxer),
+        );
+        engine.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !engine.worker_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        engine.pump();
+        let snapshot = engine.snapshot_replay().unwrap();
+        let video = snapshot
+            .streams
+            .iter()
+            .find(|stream| stream.descriptor.media_type == MediaType::Video)
+            .unwrap();
+        assert_eq!(video.descriptor.codec, "avc");
+        assert_eq!(
+            video.descriptor.extradata.as_ref().unwrap().as_slice(),
+            &[2]
+        );
+        assert_eq!(
+            video.packets.len(),
+            2,
+            "old codec packets must be discarded"
+        );
+        assert!(video
+            .packets
+            .windows(2)
+            .all(|pair| pair[1].dts >= pair[0].dts));
+        engine.stop().unwrap();
     }
 
     impl MockAv1EncoderWithAvcCapabilities {

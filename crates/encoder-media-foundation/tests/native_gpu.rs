@@ -115,8 +115,131 @@ fn encode_with_capture(
 
 fn encode_with_capture_count(
     config: VideoEncoderConfig,
+    capture: Box<dyn VideoCapture>,
+    frame_count: u32,
+) -> (u32, Vec<media_types::EncodedPacket>) {
+    encode_with_preference(config, capture, frame_count, EncoderPreference::Auto)
+}
+
+#[test]
+#[ignore = "requires interactive desktop + WGC + Windows software H.264 MFT"]
+fn software_encoder_accepts_scaled_wgc_gpu_frames() {
+    let (frames, packets) = encode_with_preference(
+        VideoEncoderConfig {
+            width: 640,
+            height: 360,
+            fps: 30,
+            ..VideoEncoderConfig::default()
+        },
+        Box::new(WgcDisplayCapture::new(StreamId(0))),
+        90,
+        EncoderPreference::SoftwareOnly,
+    );
+    assert_eq!(frames, 90);
+    assert!(!packets.is_empty(), "software encoder produced no video");
+    assert!(
+        packets.last().unwrap().pts - packets.first().unwrap().pts >= 1000,
+        "expected sustained software encoding; got {} packets",
+        packets.len()
+    );
+    assert!(packets.windows(2).all(|pair| pair[1].dts >= pair[0].dts));
+}
+
+#[test]
+#[ignore = "requires interactive desktop + WGC + Windows software H.264 MFT"]
+fn software_encoder_accepts_reported_iris_xe_capture_settings() {
+    let (frames, packets) = encode_with_preference(
+        VideoEncoderConfig {
+            width: 1600,
+            height: 900,
+            fps: 60,
+            bitrate_kbps: Some(45000),
+            ..VideoEncoderConfig::default()
+        },
+        Box::new(WgcDisplayCapture::new(StreamId(0))),
+        60,
+        EncoderPreference::SoftwareOnly,
+    );
+    assert_eq!(frames, 60);
+    assert!(!packets.is_empty());
+    assert!(packets.windows(2).all(|pair| pair[1].dts >= pair[0].dts));
+}
+
+#[test]
+#[ignore = "requires interactive desktop, WGC, software H.264 MFT and SILK_TEST_FFMPEG"]
+fn software_gpu_capture_bitstream_decodes() {
+    let (_, packets) = encode_with_preference(
+        VideoEncoderConfig {
+            width: 640,
+            height: 360,
+            fps: 30,
+            ..VideoEncoderConfig::default()
+        },
+        Box::new(WgcDisplayCapture::new(StreamId(0))),
+        120,
+        EncoderPreference::SoftwareOnly,
+    );
+    assert_bitstream_decodes(&packets);
+}
+
+#[test]
+#[ignore = "requires interactive desktop, WGC, hardware H.264 MFT and SILK_TEST_FFMPEG"]
+fn hardware_gpu_capture_bitstream_decodes() {
+    let (_, packets) = encode_with_preference(
+        VideoEncoderConfig {
+            width: 640,
+            height: 360,
+            fps: 30,
+            ..VideoEncoderConfig::default()
+        },
+        Box::new(WgcDisplayCapture::new(StreamId(0))),
+        120,
+        EncoderPreference::HardwareOnly,
+    );
+    assert_bitstream_decodes(&packets);
+}
+
+fn assert_bitstream_decodes(packets: &[media_types::EncodedPacket]) {
+    let ffmpeg = std::env::var_os("SILK_TEST_FFMPEG")
+        .expect("set SILK_TEST_FFMPEG to the approved ffmpeg executable");
+    assert!(!packets.is_empty());
+    let name = format!(
+        "silk-native-{}-{}.h264",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let path = std::env::temp_dir().join(name);
+    let bytes: Vec<u8> = packets
+        .iter()
+        .flat_map(|packet| packet.payload.as_slice().iter().copied())
+        .collect();
+    std::fs::write(&path, bytes).unwrap();
+    let result = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-xerror", "-f", "h264", "-i"])
+        .arg(&path)
+        .args(["-f", "null", "-"])
+        .output();
+    let output = result.expect("run approved FFmpeg decoder");
+    if output.status.success() {
+        std::fs::remove_file(&path).unwrap();
+    } else {
+        eprintln!("Retained failed bitstream at {}", path.display());
+    }
+    assert!(
+        output.status.success(),
+        "capture bitstream failed to decode: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn encode_with_preference(
+    config: VideoEncoderConfig,
     mut capture: Box<dyn VideoCapture>,
     frame_count: u32,
+    preference: EncoderPreference,
 ) -> (u32, Vec<media_types::EncodedPacket>) {
     let sources = enumerate_displays().expect("enumeration");
     let primary = sources
@@ -132,13 +255,16 @@ fn encode_with_capture_count(
         .expect("start capture");
 
     let context = capture.gpu_frame_context().expect("active GPU context");
-    let mut encoder = new_fallback_encoder(EncoderPreference::Auto);
+    let mut encoder = new_fallback_encoder(preference);
     encoder
         .set_gpu_frame_context(Some(context))
         .expect("install GPU context");
     encoder
         .configure(config)
         .expect("configure Media Foundation encoder");
+    if preference == EncoderPreference::SoftwareOnly {
+        assert!(!encoder.capabilities().hardware_accelerated);
+    }
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut frames = 0_u32;
@@ -155,6 +281,11 @@ fn encode_with_capture_count(
         }
     }
     packets.extend(encoder.drain().expect("drain Media Foundation encoder"));
+    eprintln!(
+        "encoded {} packets from {frames} capture frames; metrics: {:?}",
+        packets.len(),
+        encoder.metrics()
+    );
     capture.stop().expect("stop capture");
 
     (frames, packets)
