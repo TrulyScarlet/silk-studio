@@ -71,6 +71,23 @@ fn encode_native_gpu_frames(config: VideoEncoderConfig) -> (u32, Vec<media_types
 }
 
 #[test]
+#[ignore = "requires interactive desktop + WGC + hardware H.264 encoder"]
+fn wgc_replay_survives_multiple_keyframe_intervals() {
+    // Match the failing Iris Xe report and run beyond its first GOP boundary.
+    let config = VideoEncoderConfig {
+        width: 1600,
+        height: 900,
+        fps: 60,
+        ..VideoEncoderConfig::default()
+    };
+    let (frames, packets) =
+        encode_with_capture_count(config, Box::new(WgcDisplayCapture::new(StreamId(0))), 360);
+    assert_eq!(frames, 360);
+    assert!(packets.len() >= 300, "encoder stopped producing video");
+    assert!(packets.windows(2).all(|pair| pair[1].dts >= pair[0].dts));
+}
+
+#[test]
 #[ignore = "requires interactive desktop + DXGI + a D3D11-aware H.264 MFT"]
 fn media_foundation_encodes_dxgi_gpu_frames() {
     let config = VideoEncoderConfig {
@@ -91,7 +108,15 @@ fn media_foundation_encodes_dxgi_gpu_frames() {
 
 fn encode_with_capture(
     config: VideoEncoderConfig,
+    capture: Box<dyn VideoCapture>,
+) -> (u32, Vec<media_types::EncodedPacket>) {
+    encode_with_capture_count(config, capture, 120)
+}
+
+fn encode_with_capture_count(
+    config: VideoEncoderConfig,
     mut capture: Box<dyn VideoCapture>,
+    frame_count: u32,
 ) -> (u32, Vec<media_types::EncodedPacket>) {
     let sources = enumerate_displays().expect("enumeration");
     let primary = sources
@@ -118,7 +143,7 @@ fn encode_with_capture(
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut frames = 0_u32;
     let mut packets = Vec::new();
-    while Instant::now() < deadline && frames < 120 {
+    while Instant::now() < deadline && frames < frame_count {
         match capture.next_event() {
             Ok(VideoCaptureEvent::Frame(frame)) => {
                 packets.extend(encoder.encode(frame).expect("encode WGC GPU frame"));

@@ -929,17 +929,58 @@ impl MediaFoundationVideoEncoder {
 
     fn drain_output(&mut self, fallback_pts: i64) -> Result<Vec<EncodedPacket>> {
         let transform = self.transform()?.clone();
-        let (mut output, _supplied) = self.output_sample()?;
-        let mut status = 0_u32;
-        let process =
-            unsafe { transform.ProcessOutput(0, std::slice::from_mut(&mut output), &mut status) };
-        let (sample, _events) = clean_output_parts(&mut output);
-        if let Err(error) = process {
-            if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
-                return Ok(Vec::new());
+        let mut changes = 0;
+        // Retry here: a stream change produces no sample and must not consume
+        // an asynchronous HaveOutput credit or a queued presentation timestamp.
+        let sample = loop {
+            let (mut output, _supplied) = self.output_sample()?;
+            let mut status = 0_u32;
+            let process = unsafe {
+                transform.ProcessOutput(0, std::slice::from_mut(&mut output), &mut status)
+            };
+            let (sample, _events) = clean_output_parts(&mut output);
+            if let Err(error) = process {
+                if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
+                    return Ok(Vec::new());
+                }
+                if error.code()
+                    == windows::Win32::Media::MediaFoundation::MF_E_TRANSFORM_STREAM_CHANGE
+                    && changes < 4
+                {
+                    changes += 1;
+                    let media_type =
+                        unsafe { transform.GetOutputAvailableType(OUTPUT_STREAM_ID, 0) }
+                            .map_err(|error| encode_error("get changed output type", error))?;
+                    let config = self.config.as_ref().ok_or(EncoderError::NotConfigured)?;
+                    let expected_subtype =
+                        match encoder_api::normalize_codec(&self.capabilities.codec) {
+                            "hevc" => MFVideoFormat_HEVC,
+                            "av1" => MFVideoFormat_AV1,
+                            _ => MFVideoFormat_H264,
+                        };
+                    let subtype = unsafe { media_type.GetGUID(&MF_MT_SUBTYPE) }
+                        .map_err(|error| encode_error("read changed output codec", error))?;
+                    let size = unsafe { media_type.GetUINT64(&MF_MT_FRAME_SIZE) }
+                        .map_err(|error| encode_error("read changed output dimensions", error))?;
+                    if subtype != expected_subtype
+                        || size != ((config.width as u64) << 32 | config.height as u64)
+                    {
+                        return Err(EncoderError::UnsupportedConfiguration {
+                            reason: "encoder output change would alter the replay stream codec or dimensions".into(),
+                        });
+                    }
+                    unsafe { transform.SetOutputType(OUTPUT_STREAM_ID, &media_type, 0) }
+                        .map_err(|error| encode_error("set changed output type", error))?;
+                    self.output_info = Some(
+                        unsafe { transform.GetOutputStreamInfo(OUTPUT_STREAM_ID) }
+                            .map_err(|error| encode_error("refresh output stream info", error))?,
+                    );
+                    continue;
+                }
+                return Err(encode_error("process output", error));
             }
-            return Err(encode_error("process output", error));
-        }
+            break sample;
+        };
         let Some(sample) = sample else {
             return Ok(Vec::new());
         };
