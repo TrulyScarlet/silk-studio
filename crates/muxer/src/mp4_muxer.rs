@@ -2034,7 +2034,7 @@ fn sorted_mp4_packets(
     snapshot: &MediaSnapshot,
     tracks: &[PreparedTrack],
 ) -> Result<Vec<PreparedSample>> {
-    let mut all_samples = Vec::new();
+    let mut all_samples: Vec<PreparedSample> = Vec::new();
 
     for track in tracks {
         let stream = &snapshot.streams[track.stream_index];
@@ -2151,6 +2151,18 @@ fn sorted_mp4_packets(
                         expected_ticks
                     };
                 expected_ticks = start_time.saturating_add(u64::from(AAC_LC_SAMPLES_PER_FRAME));
+
+                // The MP4 writer builds stts from sample durations; it does not
+                // serialize Mp4Sample.start_time. Preserve a real capture pause
+                // in that timing table rather than silently concatenating AAC.
+                if let Some(previous) = all_samples
+                    .last_mut()
+                    .filter(|sample| sample.track_id == track.track_id)
+                {
+                    previous.sample.duration =
+                        u32::try_from(start_time.saturating_sub(previous.sample.start_time))
+                            .map_err(|_| validation_error("audio pause duration exceeds u32"))?;
+                }
 
                 let raw = strip_adts_if_present(packet.payload.as_slice());
                 if raw.is_empty() {
@@ -2691,6 +2703,46 @@ mod tests {
         assert_eq!(sample2.duration, 33);
         assert!(!sample2.is_sync);
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn audio_recovery_gap_survives_mp4_timing_tables() {
+        let path = temp_output_path();
+        let snapshot = MediaSnapshot {
+            origin_pts: 0,
+            time_base: TimeBase::MILLISECOND,
+            captured_at_unix_ms: 1,
+            streams: vec![
+                StreamPackets {
+                    descriptor: video_descriptor(Some(avcc_extradata(SPS, PPS))),
+                    packets: vec![video_packet(0, 0, 1000, true, avcc_payload(&[IDR]))],
+                },
+                StreamPackets {
+                    descriptor: audio_descriptor(
+                        StreamId(1),
+                        Some("Audio"),
+                        48_000,
+                        2,
+                        Some(vec![0x11, 0x90]),
+                    ),
+                    packets: vec![
+                        audio_packet(StreamId(1), 0, 0, 21, vec![0x21, 0x10, 0x01]),
+                        audio_packet(StreamId(1), 521, 521, 21, vec![0x21, 0x10, 0x02]),
+                    ],
+                },
+            ],
+        };
+        let metadata = Mp4Muxer
+            .write_snapshot(&snapshot, &path, &SaveOptions::default())
+            .unwrap();
+        let mut file = File::open(&path).unwrap();
+        let mut reader = Mp4Reader::read_header(&mut file, metadata.size_bytes).unwrap();
+        let second = reader.read_sample(2, 2).unwrap().unwrap();
+        assert_eq!(
+            second.start_time, 25_008,
+            "500ms device downtime collapsed in stts"
+        );
         let _ = fs::remove_file(path);
     }
 

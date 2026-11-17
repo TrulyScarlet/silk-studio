@@ -166,9 +166,18 @@ fn configure_settings(
     settings: configuration::AppConfig,
 ) -> Result<(), String> {
     shell::apply_app_settings(&state, &settings)?;
-    theme_icon::apply_theme_icon(&app, settings.application.theme);
+    theme_icon::apply_theme_icon(
+        &app,
+        settings
+            .application
+            .icon_theme
+            .unwrap_or(settings.application.theme),
+    );
     if let Some(hud) = app.try_state::<hud::HudRuntime>() {
-        hud.reconfigure(settings.overlay);
+        hud.reconfigure_with_palette(
+            settings.overlay,
+            hud::palette_from_settings(&settings.application),
+        );
     }
     Ok(())
 }
@@ -182,8 +191,9 @@ fn update_theme_icon(
     // Keep the IPC payload compatible, but never let a late frontend effect
     // overwrite the native icon with an older theme after a newer settings save.
     let _ = theme;
-    let t = shell::app_settings(&state)?.application.theme;
-    theme_icon::apply_theme_icon(&app, t);
+    let settings = shell::app_settings(&state)?;
+    let t = settings.application.theme;
+    theme_icon::apply_theme_icon(&app, settings.application.icon_theme.unwrap_or(t));
 
     if let Some(window) = app.get_webview_window("main") {
         let (r, g, b) = match t {
@@ -696,9 +706,9 @@ fn main() {
             ));
             sound::initialize();
             updates::start_checks(app.handle().clone());
-            app.manage(hud::HudRuntime::init(settings.overlay));
+            app.manage(hud::HudRuntime::init_with_palette(settings.overlay, hud::palette_from_settings(&settings.application)));
             tray::setup(app)?;
-            theme_icon::apply_theme_icon(app.handle(), settings.application.theme);
+            theme_icon::apply_theme_icon(app.handle(), settings.application.icon_theme.unwrap_or(settings.application.theme));
             // Publish native icons and Shell identity before Explorer sees the window.
             if let Some(window) = app.get_webview_window("main") {
                 window.show()?;

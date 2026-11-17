@@ -1,0 +1,60 @@
+[package]
+name = "capture-hook-prototype"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+d3d12-observed-loss-fixture = ["d3d12-remote-helper-fixture", "d3d12-device-replace-fixture"]
+d3d12-auto-resize-fixture = ["d3d12-late-resize-fixture", "d3d12-rearm-fixture"]
+d3d12-late-resize-fixture = ["d3d12-remote-helper-fixture"]
+d3d12-remote-helper-fixture = ["resident-hooks", "d3d12-bootstrap-fixture"]
+default = []
+d3d12-fixture = ["dep:windows", "windows/Win32_Graphics_Direct3D12"]
+d3d12-gpu-fixture = ["d3d12-fixture", "dep:gpu-windows", "dep:encoder-api", "dep:media-types"]
+d3d12-cross-process = ["d3d12-gpu-fixture", "dep:capture-api"]
+d3d12-present-hook-fixture = ["d3d12-cross-process", "dep:minhook"]
+d3d12-factory-hook-fixture = ["d3d12-present-hook-fixture"]
+d3d12-bootstrap-fixture = ["d3d12-factory-hook-fixture", "windows/Win32_System_ProcessStatus"]
+d3d12-rearm-fixture = ["d3d12-bootstrap-fixture"]
+d3d12-device-replace-fixture = ["d3d12-rearm-fixture"]
+fixture-probes = ["experimental-hooks"]
+resident-hooks = ["experimental-hooks", "windows/Win32_System_Diagnostics_ToolHelp", "windows/Win32_System_Diagnostics_Debug", "windows/Win32_System_Kernel", "windows/Win32_System_Memory", "windows/Win32_System_SystemInformation"]
+experimental-hooks = ["dep:minhook", "dep:windows", "dep:gpu-windows", "dep:capture-api", "dep:media-types", "dep:encoder-api"]
+
+[target.'cfg(windows)'.dependencies]
+# minhook 0.9.0: https://crates.io/crates/minhook/0.9.0, MIT wrapper;
+# bundled MinHook 1.3.3/HDE, BSD-2-Clause. Static, opt-in fixture only.
+# Source revision and required notices: THIRD_PARTY_LICENSES.md and
+# licenses/experimental-minhook.txt. Not linked into the desktop application.
+minhook = { version = "=0.9.0", optional = true }
+gpu-windows = { workspace = true, optional = true }
+capture-api = { workspace = true, optional = true }
+media-types = { workspace = true, optional = true }
+encoder-api = { workspace = true, optional = true }
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader", "Win32_System_Performance",
+    "Win32_System_Threading", "Win32_UI_WindowsAndMessaging",
+    "Win32_Security",
+] }
+
+[dev-dependencies]
+capture-windows = { workspace = true }
+encoder-api = { workspace = true }
+encoder-media-foundation = { workspace = true }
+recorder-engine = { workspace = true }
+muxer = { workspace = true }
+mp4 = { workspace = true }
+sha2 = { workspace = true }
+
+[[bin]]
+name = "silk-d3d11-hook-fixture"
+path = "src/bin/d3d11_fixture.rs"
+required-features = ["experimental-hooks"]
+
+[[bin]]
+name = "silk-d3d12-owned-fixture"
+path = "src/bin/d3d12_owned_fixture.rs"
+required-features = ["d3d12-cross-process"]

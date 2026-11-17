@@ -451,6 +451,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "capture-hook-helper"
+version = "0.1.0"
+dependencies = [
+ "capture-hook-prototype",
+ "gpu-windows",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "capture-hook-prototype"
+version = "0.1.0"
+dependencies = [
+ "capture-api",
+ "capture-windows",
+ "encoder-api",
+ "encoder-media-foundation",
+ "gpu-windows",
+ "media-types",
+ "minhook",
+ "muxer",
+ "recorder-engine",
+ "sha2",
+ "silk-mp4",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "capture-windows"
 version = "0.1.0"
 dependencies = [
@@ -2424,6 +2451,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "minhook"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "455e088cb1600ffa5f1524c9702c9eeb0ba3604e0f4932efa165b99973272a8d"
+dependencies = [
+ "cc",
+ "tracing",
+]
+
+[[package]]
 name = "minisign-verify"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3870,7 +3907,7 @@ dependencies = [
 
 [[package]]
 name = "silk"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "app-controller",
  "audio-api",
@@ -4897,6 +4934,7 @@ version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
+ "log",
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",

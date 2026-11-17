@@ -24,15 +24,17 @@ mod dxgi;
 mod dxgi_cursor;
 mod dxgi_pool;
 mod enumerate;
+mod guarded;
 mod session;
 
 pub use display::DisplayCapture;
 pub use dxgi::DxgiDisplayCapture;
 pub use enumerate::{
     capture_target_window, enumerate_adapters, enumerate_displays, enumerate_windows,
-    GraphicsAdapterInfo,
+    is_recognized_game, GraphicsAdapterInfo,
 };
 pub use gpu_windows::GpuTextureSlot;
+pub use guarded::GuardedWindowCapture;
 pub use session::WgcDisplayCapture;
 
 /// Feature probe used at startup/settings time: reports whether this OS

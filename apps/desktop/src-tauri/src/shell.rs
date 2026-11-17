@@ -914,7 +914,13 @@ pub(crate) fn controller_settings_from_config(settings: &AppConfig) -> Controlle
         output_dir: managed_clip_directory(Path::new(&settings.output.directory)),
         file_name_pattern: settings.output.file_name_pattern.clone(),
         organize_by_game: true,
-        source_name: settings.capture.source_id.clone(),
+        source_name: match settings.capture.source_type.to_ascii_lowercase().as_str() {
+            "game-auto" => "game:auto".to_string(),
+            "window" => format!("window:{}", settings.capture.source_id),
+            "game" => format!("game:{}", settings.capture.source_id),
+            "game-guarded" | "guarded" => format!("game-guarded:{}", settings.capture.source_id),
+            _ => settings.capture.source_id.clone(),
+        },
         retention_ms: i64::from(settings.replay.duration_seconds).saturating_mul(1_000),
         video_encoder_config: encoder_api::VideoEncoderConfig {
             codec: settings.encoding.video_codec.clone(),
@@ -1447,13 +1453,23 @@ pub struct RecorderStatus {
 }
 
 pub fn recorder_status(state: &ShellState) -> Result<RecorderStatus, String> {
-    let source_id = state
+    let capture_settings = state
         .settings
         .lock()
         .map_err(|e| e.to_string())?
         .capture
-        .source_id
         .clone();
+    let source_id = match capture_settings.source_type.to_ascii_lowercase().as_str() {
+        "game-auto" => state
+            .controller
+            .lock()
+            .map_err(|e| e.to_string())?
+            .capture_target()
+            .unwrap_or_else(|| "waiting:game".to_string()),
+        "game" | "game-guarded" | "guarded" => format!("game:{}", capture_settings.source_id),
+        "window" => format!("window:{}", capture_settings.source_id),
+        _ => capture_settings.source_id,
+    };
     let target = capture_windows::capture_target_window(&source_id).map(|(window, fullscreen)| {
         let name = app_controller::clean_game_name(
             window.app_name.as_deref().unwrap_or(&window.title),
@@ -1468,12 +1484,21 @@ pub fn recorder_status(state: &ShellState) -> Result<RecorderStatus, String> {
         .controller
         .lock()
         .map_err(|error| format!("controller lock poisoned: {error}"))?;
+    let is_stopped = controller.state().to_string() == "Stopped";
+    let capture_target = if is_stopped {
+        None
+    } else if let Some(target_label) = target {
+        Some(target_label)
+    } else if capture_settings
+        .source_type
+        .eq_ignore_ascii_case("game-auto")
+    {
+        Some("Game: Auto-detect (Waiting for game capture)".to_string())
+    } else {
+        None
+    };
     Ok(RecorderStatus {
-        capture_target: if controller.state().to_string() == "Stopped" {
-            None
-        } else {
-            target
-        },
+        capture_target,
         state: controller.state().to_string(),
         buffer_duration_ms: controller.buffer_duration_ms(),
         buffered_packet_count: controller.buffered_packet_count(),

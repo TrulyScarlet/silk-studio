@@ -18,7 +18,9 @@ Do not:
 - Copy OBS assets, UI, branding, comments, or documentation.
 - Use code from OBS issues, patches, or pull requests.
 - Introduce GPL or similarly restrictive dependencies without approval.
-- Implement process injection or graphics hooks during the MVP.
+- Implement process injection or graphics hooks outside the opt-in experimental
+  game-capture scope in ADR 0044. Anti-cheat bypass, stealth injection, kernel
+  drivers, and injection into unrelated or protected processes remain prohibited.
 - Place real-time media processing in the UI.
 - Claim hardware behavior is verified unless it was actually tested.
 

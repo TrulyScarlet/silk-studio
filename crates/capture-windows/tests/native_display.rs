@@ -102,7 +102,7 @@ fn captures_monotonic_frames_from_primary_display() {
                 last_pts = Some(frame.pts);
                 frames += 1;
             }
-            Ok(VideoCaptureEvent::FormatChanged { .. }) => {}
+            Ok(VideoCaptureEvent::FormatChanged { .. } | VideoCaptureEvent::Idle) => {}
             Ok(VideoCaptureEvent::SourceLost) => panic!("source lost during healthy run"),
             Err(err) => panic!("capture error after {frames} frames: {err}"),
         }
@@ -170,7 +170,7 @@ fn gpu_context_resolves_a_staged_texture() {
                     Err(err) => panic!("GPU resource resolution failed: {err}"),
                 }
             }
-            Ok(VideoCaptureEvent::FormatChanged { .. }) => {}
+            Ok(VideoCaptureEvent::FormatChanged { .. } | VideoCaptureEvent::Idle) => {}
             Ok(VideoCaptureEvent::SourceLost) => panic!("source lost during healthy run"),
             Err(err) => panic!("capture error while resolving GPU frame: {err}"),
         }
@@ -227,7 +227,7 @@ fn gpu_video_processor_converts_wgc_frame_to_nv12() {
                 converted = true;
                 break;
             }
-            Ok(VideoCaptureEvent::FormatChanged { .. }) => {}
+            Ok(VideoCaptureEvent::FormatChanged { .. } | VideoCaptureEvent::Idle) => {}
             Ok(VideoCaptureEvent::SourceLost) => panic!("source lost during conversion"),
             Err(error) => panic!("capture error during conversion: {error}"),
         }

@@ -28,7 +28,7 @@ use crate::dxgi_pool::LeasePool;
 const POOL_SIZE: usize = 8;
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1 << 63);
 
-pub(super) fn backend(error: impl std::fmt::Display) -> VideoCaptureError {
+pub(crate) fn backend(error: impl std::fmt::Display) -> VideoCaptureError {
     VideoCaptureError::Backend {
         details: format!("DXGI: {error}"),
     }
@@ -85,6 +85,9 @@ impl DxgiDisplayCapture {
 }
 
 impl VideoCapture for DxgiDisplayCapture {
+    fn timestamp_origin(&self) -> Option<Instant> {
+        Some(media_clock::capture_epoch())
+    }
     fn enumerate_sources(&self) -> Result<Vec<VideoSourceInfo>> {
         crate::enumerate_displays()
     }
@@ -213,7 +216,7 @@ struct Session {
 }
 
 // Every successful AcquireNextFrame has a ReleaseFrame, including error paths.
-struct Acquired<'a>(&'a IDXGIOutputDuplication);
+pub(crate) struct Acquired<'a>(pub(crate) &'a IDXGIOutputDuplication);
 impl Drop for Acquired<'_> {
     fn drop(&mut self) {
         unsafe {
@@ -224,9 +227,9 @@ impl Drop for Acquired<'_> {
 
 // A per-worker high-resolution timer avoids the ~15.6 ms default scheduler
 // interval limiting 120 fps capture. No global timer-resolution change or spin.
-struct FrameTimer(HANDLE);
+pub(crate) struct FrameTimer(HANDLE);
 impl FrameTimer {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         unsafe {
             CreateWaitableTimerExW(
                 None,
@@ -238,7 +241,7 @@ impl FrameTimer {
         .map(Self)
         .map_err(backend)
     }
-    fn wait(&self, duration: Duration) -> Result<()> {
+    pub(crate) fn wait(&self, duration: Duration) -> Result<()> {
         let ticks = -((duration.as_nanos() / 100).max(1) as i64);
         unsafe {
             SetWaitableTimer(self.0, &ticks, 0, None, None, false).map_err(backend)?;
@@ -310,7 +313,7 @@ impl Session {
     ) -> Result<()> {
         let timer = FrameTimer::new()?;
         let started = Instant::now();
-        let mut origin = None;
+        let mut origin = Some(media_clock::capture_epoch());
         let mut has_desktop = false;
         let mut delivered = 0_u64;
         let mut dropped = 0_u64;
@@ -413,12 +416,12 @@ impl Session {
 
 // Deadlines derive from the original epoch; fractional frame intervals do not
 // accumulate millisecond rounding error, and a stall never causes a catch-up burst.
-fn next_tick_ns(elapsed: u64, fps: u32) -> u64 {
+pub(crate) fn next_tick_ns(elapsed: u64, fps: u32) -> u64 {
     let frame = u128::from(elapsed) * u128::from(fps) / 1_000_000_000 + 1;
     (frame * 1_000_000_000).div_ceil(u128::from(fps)) as u64
 }
 
-pub(super) fn texture(
+pub(crate) fn texture(
     gpu: &GpuDeviceContext,
     width: u32,
     height: u32,

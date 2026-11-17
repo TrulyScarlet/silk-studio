@@ -15,7 +15,7 @@ pub enum VideoCaptureError {
     #[error("no capture source is available")]
     SourceUnavailable,
 
-    #[error("capture permission was denied by the operating system")]
+    #[error("capture was denied by Windows or the selected application; this source may be unsupported. Check Windows capture permissions or select another supported window. Application-enforced capture exclusions cannot be overridden. Silk will not bypass capture restrictions or switch to desktop capture")]
     PermissionDenied,
 
     #[error("the capture source was lost")]
@@ -45,6 +45,23 @@ impl VideoCaptureError {
     }
 }
 
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    #[test]
+    fn permission_denial_preserves_code_and_explains_application_restrictions() {
+        let error = VideoCaptureError::PermissionDenied;
+        assert_eq!(error.code(), "CAPTURE_PERMISSION_DENIED");
+        let message = error.to_string();
+        assert!(message.contains("selected application"));
+        assert!(message.contains("unsupported"));
+        assert!(message.contains("will not bypass"));
+        assert!(message.contains("or switch to desktop capture"));
+        assert!(message.contains("Check Windows capture permissions"));
+        assert!(message.contains("select another supported window"));
+    }
+}
+
 /// Requested capture parameters for one display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoCaptureConfig {
@@ -55,6 +72,9 @@ pub struct VideoCaptureConfig {
 /// Events produced by an active video capture session.
 #[derive(Debug, Clone)]
 pub enum VideoCaptureEvent {
+    /// No frame is currently available. This is not source loss: return control
+    /// so the caller can service stop/reconfiguration without fabricating media.
+    Idle,
     Frame(VideoFrame),
     FormatChanged {
         width: u32,
@@ -68,6 +88,14 @@ pub enum VideoCaptureEvent {
 /// Original interface for display capture. Implementations own any
 /// platform resources and must document their thread-affinity rules.
 pub trait VideoCapture: Send {
+    /// Identity of the attached capture session, not a separately detected app.
+    fn active_source_id(&self) -> Option<String> {
+        None
+    }
+    /// Epoch of frame timestamps, when correlated to the host monotonic clock.
+    fn timestamp_origin(&self) -> Option<std::time::Instant> {
+        None
+    }
     fn enumerate_sources(&self) -> Result<Vec<VideoSourceInfo>>;
     fn start(&mut self, config: VideoCaptureConfig) -> Result<()>;
     fn next_event(&mut self) -> Result<VideoCaptureEvent>;

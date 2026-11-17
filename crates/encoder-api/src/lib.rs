@@ -552,6 +552,12 @@ pub trait AudioEncoder: Send {
 /// bounded and update them on the encoding worker, never on the UI thread.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncoderMetrics {
+    /// GPU inputs converted to a native DXGI/MF surface without CPU readback.
+    #[serde(default)]
+    pub gpu_surface_inputs: u64,
+    /// GPU inputs read back for a system-memory encoder path (not GPU-only).
+    #[serde(default)]
+    pub cpu_readback_inputs: u64,
     pub frames_submitted: u64,
     pub frames_encoded: u64,
     pub frames_dropped: u64,
@@ -792,7 +798,21 @@ impl VideoEncoder for FallbackVideoEncoder {
             let backend = active.capabilities().backend_name;
             let retry_frame = frame_for_retry.clone();
             let started = Instant::now();
+            let input_before = active.metrics();
             let result = active.encode(frame_for_retry);
+            let input_after = active.metrics();
+            // Count each attempt before a failing backend is retired. Looking
+            // only at the currently active encoder would hide earlier readbacks.
+            self.metrics.gpu_surface_inputs = self.metrics.gpu_surface_inputs.saturating_add(
+                input_after
+                    .gpu_surface_inputs
+                    .saturating_sub(input_before.gpu_surface_inputs),
+            );
+            self.metrics.cpu_readback_inputs = self.metrics.cpu_readback_inputs.saturating_add(
+                input_after
+                    .cpu_readback_inputs
+                    .saturating_sub(input_before.cpu_readback_inputs),
+            );
             match result {
                 Ok(packets) => {
                     self.update_latency(started);
@@ -944,6 +964,15 @@ impl Drop for FallbackVideoEncoder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn old_metrics_payloads_default_new_gpu_input_counters() {
+        let mut value = serde_json::to_value(super::EncoderMetrics::default()).unwrap();
+        value.as_object_mut().unwrap().remove("gpu_surface_inputs");
+        value.as_object_mut().unwrap().remove("cpu_readback_inputs");
+        let metrics: super::EncoderMetrics = serde_json::from_value(value).unwrap();
+        assert_eq!(metrics.gpu_surface_inputs, 0);
+        assert_eq!(metrics.cpu_readback_inputs, 0);
+    }
     use super::*;
     use media_types::{MediaType, PacketPayload, PixelFormat, StreamId, TimeBase};
     use std::sync::Mutex;
@@ -1206,6 +1235,8 @@ mod tests {
         fail_encode: bool,
         drop_encode: bool,
         frames_dropped: u64,
+        gpu_surface_inputs: u64,
+        cpu_readback_inputs: u64,
         configured: bool,
     }
 
@@ -1229,6 +1260,13 @@ mod tests {
         fn encode(&mut self, frame: VideoFrame) -> Result<Vec<EncodedPacket>> {
             if !self.configured {
                 return Err(EncoderError::NotConfigured);
+            }
+            if matches!(frame.payload, FramePayload::Gpu(_)) {
+                if self.capabilities.hardware_accelerated {
+                    self.gpu_surface_inputs += 1;
+                } else {
+                    self.cpu_readback_inputs += 1;
+                }
             }
             if self.fail_encode {
                 return Err(EncoderError::EncodeFailed {
@@ -1258,6 +1296,8 @@ mod tests {
 
         fn metrics(&self) -> EncoderMetrics {
             EncoderMetrics {
+                gpu_surface_inputs: self.gpu_surface_inputs,
+                cpu_readback_inputs: self.cpu_readback_inputs,
                 frames_dropped: self.frames_dropped,
                 active_backend: Some(self.capabilities.backend_name.clone()),
                 ..EncoderMetrics::default()
@@ -1267,6 +1307,36 @@ mod tests {
 
     struct FakeFactory {
         candidates: Vec<EncoderCandidate>,
+    }
+
+    #[test]
+    fn gpu_input_counters_include_failed_attempts_and_do_not_double_count_snapshots() {
+        let mut encoder = FallbackVideoEncoder::new(
+            Box::new(FakeFactory {
+                candidates: vec![
+                    candidate("hardware", "hardware-fails", true),
+                    candidate("software", "software", false),
+                ],
+            }),
+            EncoderPreference::Auto,
+        );
+        encoder.configure(VideoEncoderConfig::default()).unwrap();
+        let frame = VideoFrame {
+            stream_id: StreamId(0),
+            width: 1920,
+            height: 1080,
+            pixel_format: PixelFormat::Bgra8,
+            pts: 0,
+            time_base: TimeBase::MILLISECOND,
+            payload: FramePayload::Gpu(GpuFrameHandle(1)),
+        };
+        encoder.encode(frame.clone()).unwrap();
+        assert_eq!(encoder.metrics().gpu_surface_inputs, 2);
+        assert_eq!(encoder.metrics().cpu_readback_inputs, 1);
+        assert_eq!(encoder.metrics().cpu_readback_inputs, 1);
+        encoder.encode(VideoFrame { pts: 33, ..frame }).unwrap();
+        assert_eq!(encoder.metrics().gpu_surface_inputs, 2);
+        assert_eq!(encoder.metrics().cpu_readback_inputs, 2);
     }
 
     #[test]
@@ -1368,6 +1438,8 @@ mod tests {
                 fail_encode: candidate.id == "hardware",
                 drop_encode: candidate.id == "drop",
                 frames_dropped: 0,
+                gpu_surface_inputs: 0,
+                cpu_readback_inputs: 0,
                 configured: false,
             }))
         }

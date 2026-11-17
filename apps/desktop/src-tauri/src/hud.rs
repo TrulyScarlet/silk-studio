@@ -6,8 +6,49 @@
 use std::sync::{Mutex, RwLock};
 
 use app_controller::ControllerEvent;
-use configuration::{OverlayMode, OverlayPosition, OverlaySettings};
-use native_hud::{HudAnchor, HudConfig, HudCue, HudMode, NativeHud};
+use configuration::{ApplicationSettings, OverlayMode, OverlayPosition, OverlaySettings, Theme};
+use native_hud::{HudAnchor, HudConfig, HudCue, HudMode, HudPalette, NativeHud};
+
+pub fn palette_from_settings(settings: &ApplicationSettings) -> HudPalette {
+    fn parse(value: Option<&str>, fallback: [u8; 3]) -> [u8; 3] {
+        value
+            .and_then(|s| {
+                if s.len() != 7
+                    || !s.starts_with('#')
+                    || !s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+                {
+                    return None;
+                }
+                Some([
+                    u8::from_str_radix(&s[1..3], 16).ok()?,
+                    u8::from_str_radix(&s[3..5], 16).ok()?,
+                    u8::from_str_radix(&s[5..7], 16).ok()?,
+                ])
+            })
+            .unwrap_or(fallback)
+    }
+    let (accent, background) = match settings.theme {
+        Theme::Studio => ([239, 239, 237], [8, 8, 8]),
+        Theme::Classic => ([228, 210, 155], [16, 17, 14]),
+        Theme::Ember => ([234, 177, 124], [20, 15, 12]),
+        Theme::Vamp => ([234, 165, 176], [16, 13, 17]),
+    };
+    let colors = &settings.colors;
+    HudPalette {
+        accent: parse(
+            colors.overlay_accent.as_deref(),
+            parse(colors.main.as_deref(), accent),
+        ),
+        background: parse(
+            colors.overlay_background.as_deref(),
+            parse(colors.background.as_deref(), background),
+        ),
+        text: parse(
+            colors.overlay_text.as_deref(),
+            parse(colors.text.as_deref(), [242, 242, 240]),
+        ),
+    }
+}
 
 /// Map configuration overlay mode 1:1 to native HUD mode.
 pub fn map_mode(mode: OverlayMode) -> HudMode {
@@ -37,6 +78,7 @@ pub fn hud_config_from_settings(settings: &OverlaySettings) -> HudConfig {
         mode: map_mode(settings.mode),
         anchor: map_anchor(settings.position),
         exclude_from_capture: true,
+        ..Default::default()
     }
 }
 
@@ -61,6 +103,7 @@ pub fn cue_for_event(event: &ControllerEvent) -> Option<HudCue> {
 
 struct HudInner {
     settings: OverlaySettings,
+    palette: HudPalette,
     hud: Option<NativeHud>,
 }
 
@@ -78,9 +121,17 @@ impl HudRuntime {
     ///
     /// When disabled, no HWND or background rendering thread is created.
     /// If initialization fails, logs a truthful warning and leaves HUD disabled.
+    #[cfg(test)]
     pub fn init(settings: OverlaySettings) -> Self {
+        Self::init_with_palette(settings, HudPalette::default())
+    }
+
+    pub fn init_with_palette(settings: OverlaySettings, palette: HudPalette) -> Self {
         let hud = if settings.enabled {
-            let config = hud_config_from_settings(&settings);
+            let config = HudConfig {
+                palette,
+                ..hud_config_from_settings(&settings)
+            };
             match NativeHud::try_new(config) {
                 Ok(hud) => Some(hud),
                 Err(error) => {
@@ -95,7 +146,11 @@ impl HudRuntime {
             None
         };
         Self {
-            inner: RwLock::new(HudInner { settings, hud }),
+            inner: RwLock::new(HudInner {
+                settings,
+                palette,
+                hud,
+            }),
             reconfig_lock: Mutex::new(()),
         }
     }
@@ -106,6 +161,7 @@ impl HudRuntime {
         Self {
             inner: RwLock::new(HudInner {
                 settings,
+                palette: HudPalette::default(),
                 hud: None,
             }),
             reconfig_lock: Mutex::new(()),
@@ -159,7 +215,12 @@ impl HudRuntime {
     /// Serializes concurrent reconfigurations. Builds the replacement outside
     /// the inner lock, atomically swaps instances under a brief write lock, and
     /// joins the previous worker outside all locks on drop.
+    #[cfg(test)]
     pub fn reconfigure(&self, new_settings: OverlaySettings) {
+        self.reconfigure_with_palette(new_settings, HudPalette::default());
+    }
+
+    pub fn reconfigure_with_palette(&self, new_settings: OverlaySettings, palette: HudPalette) {
         let reconfig_guard = match self.reconfig_lock.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -170,7 +231,7 @@ impl HudRuntime {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            let settings_changed = guard.settings != new_settings;
+            let settings_changed = guard.settings != new_settings || guard.palette != palette;
             let missing_or_unhealthy =
                 new_settings.enabled && guard.hud.as_ref().is_none_or(|h| !h.is_healthy());
             settings_changed || missing_or_unhealthy
@@ -181,7 +242,10 @@ impl HudRuntime {
         }
 
         let new_hud = if new_settings.enabled {
-            let config = hud_config_from_settings(&new_settings);
+            let config = HudConfig {
+                palette,
+                ..hud_config_from_settings(&new_settings)
+            };
             match NativeHud::try_new(config) {
                 Ok(hud) => Some(hud),
                 Err(error) => {
@@ -202,6 +266,7 @@ impl HudRuntime {
                 Err(p) => p.into_inner(),
             };
             guard.settings = new_settings;
+            guard.palette = palette;
             std::mem::replace(&mut guard.hud, new_hud)
         };
 
@@ -238,6 +303,55 @@ impl HudRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hud_palette_tracks_theme_and_custom_overrides() {
+        let mut settings = ApplicationSettings::default();
+        for (theme, accent) in [
+            (Theme::Studio, [239, 239, 237]),
+            (Theme::Classic, [228, 210, 155]),
+            (Theme::Ember, [234, 177, 124]),
+            (Theme::Vamp, [234, 165, 176]),
+        ] {
+            settings.theme = theme;
+            assert_eq!(palette_from_settings(&settings).accent, accent);
+        }
+        settings.colors.main = Some("#123456".into());
+        settings.colors.background = Some("#010203".into());
+        settings.colors.text = Some("#aabbcc".into());
+        assert_eq!(
+            palette_from_settings(&settings),
+            HudPalette {
+                accent: [18, 52, 86],
+                background: [1, 2, 3],
+                text: [170, 187, 204]
+            }
+        );
+        settings.colors.overlay_accent = Some("#fedcba".into());
+        settings.colors.overlay_background = Some("#101112".into());
+        settings.colors.overlay_text = Some("#eeeeee".into());
+        assert_eq!(
+            palette_from_settings(&settings),
+            HudPalette {
+                accent: [254, 220, 186],
+                background: [16, 17, 18],
+                text: [238, 238, 238]
+            }
+        );
+        settings.colors.overlay_text = Some("#🐱".into());
+        assert_eq!(palette_from_settings(&settings).text, [170, 187, 204]);
+    }
+
+    #[test]
+    fn palette_only_reconfigure_updates_disabled_runtime_without_enabling_it() {
+        let runtime = HudRuntime::headless(OverlaySettings::default());
+        let palette = HudPalette {
+            accent: [1, 2, 3],
+            ..Default::default()
+        };
+        runtime.reconfigure_with_palette(OverlaySettings::default(), palette);
+        assert_eq!(runtime.inner.read().unwrap().palette, palette);
+        assert!(!runtime.is_active());
+    }
     use super::*;
     use app_controller::ControllerEvent;
     use configuration::{OverlayMode, OverlayPosition, OverlaySettings};

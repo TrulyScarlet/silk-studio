@@ -20,8 +20,8 @@ pub use model::{
     ContainerFormat, DiagnosticLogLevel, DiagnosticsSettings, EncoderSelection, EncodingSettings,
     HotkeysSettings, OutputResolution, OutputSettings, OverlayMode, OverlayPosition,
     OverlaySettings, QualityPreset, ReplaySettings, StorageSettings, Theme, ThemeColors,
-    VideoFidelityMode, DEFAULT_AUDIO_TRACK_GAIN, DEFAULT_FILE_NAME_PATTERN, DEFAULT_SAVE_HOTKEY,
-    MAX_AUDIO_TRACKS,
+    ThemePreset, VideoFidelityMode, DEFAULT_AUDIO_TRACK_GAIN, DEFAULT_FILE_NAME_PATTERN,
+    DEFAULT_SAVE_HOTKEY, MAX_AUDIO_TRACKS,
 };
 pub use validate::validate_settings;
 

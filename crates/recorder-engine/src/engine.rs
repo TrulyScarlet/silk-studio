@@ -16,7 +16,7 @@ use replay_buffer::{normalize_timestamps, BufferConfig, ReplayBuffer};
 
 use crate::error::EngineError;
 use crate::state::{validate_transition, RecorderState};
-use crate::video_timeline::VideoTimeline;
+use crate::video_timeline::{map_capture_timestamp, signed_elapsed_ms, VideoTimeline};
 
 pub const AUDIO_RESTART_LIMIT: u32 = 3;
 pub const VIDEO_RESTART_LIMIT: u32 = 5;
@@ -230,6 +230,7 @@ type SharedBuffer = Arc<Mutex<ReplayBuffer>>;
 
 #[derive(Clone)]
 struct VideoWorkerShared {
+    capture_target: Arc<Mutex<Option<String>>>,
     buffer: SharedBuffer,
     shutdown: Arc<AtomicBool>,
     encoder_metrics: Arc<Mutex<EncoderMetrics>>,
@@ -245,6 +246,7 @@ struct AudioWorkerShared {
 }
 
 struct AudioWorkerConfig {
+    capture_started_at: Instant,
     capture_config: AudioCaptureConfig,
     stream_id: StreamId,
     label: String,
@@ -260,6 +262,7 @@ struct AudioWorkerConfig {
 /// mutex shared by worker (insert) and controller (snapshot); no lock is
 /// held across encode or file output.
 pub struct RecorderEngine {
+    capture_target: Arc<Mutex<Option<String>>>,
     config: EngineConfig,
     state: RecorderState,
     events_tx: EngineEventPublisher,
@@ -312,6 +315,7 @@ impl RecorderEngine {
             event_drops,
             buffer,
             shutdown: Arc::new(AtomicBool::new(false)),
+            capture_target: Arc::new(Mutex::new(None)),
             encoder_metrics: Arc::new(Mutex::new(EncoderMetrics::default())),
             scaling_status: Arc::new(Mutex::new(VideoScalingStatus::default())),
             audio_sync_metrics: Arc::new(Mutex::new(BTreeMap::new())),
@@ -333,6 +337,11 @@ impl RecorderEngine {
             .lock()
             .map(|b| b.metrics().packet_count)
             .unwrap_or(0)
+    }
+
+    /// Identity reported by the attached capture session.
+    pub fn capture_target(&self) -> Option<String> {
+        self.capture_target.lock().ok()?.clone()
     }
 
     /// Buffered video span in milliseconds.
@@ -496,7 +505,22 @@ impl RecorderEngine {
     /// Buffering → Ready once the replay window is primed (spec §9.2).
     pub fn start(&mut self) -> Result<(), EngineError> {
         diagnostics::info("engine", "start requested");
-        if self.config.follow_source_dimensions {
+        let isolated_source = self.config.video_source_id.starts_with("window:")
+            || self.config.video_source_id.starts_with("game:");
+        if isolated_source
+            && self.config.video_source_id != "game:auto"
+            && !self.config.video_source_id.contains(":hwnd:")
+            && !self.config.video_source_id.contains(":pid:")
+        {
+            return Err(capture_api::VideoCaptureError::InvalidConfiguration {
+                reason: "Select a running application in Capture settings; game/window mode never falls back to desktop capture".into(),
+            }.into());
+        }
+        let aspect_bounds = (isolated_source && !self.config.follow_source_dimensions).then_some((
+            self.config.video_encoder.width,
+            self.config.video_encoder.height,
+        ));
+        if self.config.follow_source_dimensions || isolated_source {
             let capture = self
                 .pending_parts
                 .as_ref()
@@ -520,8 +544,10 @@ impl RecorderEngine {
                     .flatten()
                 })
                 .ok_or(capture_api::VideoCaptureError::SourceUnavailable)?;
-            self.config.video_encoder.width = source.width;
-            self.config.video_encoder.height = source.height;
+            let (width, height) =
+                source_output_dimensions(source.width, source.height, aspect_bounds);
+            self.config.video_encoder.width = width;
+            self.config.video_encoder.height = height;
         }
         // Validate common settings before taking ownership of the injected
         // components so a rejected start remains retryable.
@@ -601,6 +627,7 @@ impl RecorderEngine {
             encoder_config: self.config.video_encoder.clone(),
             scaling_plan,
             follow_source_dimensions: self.config.follow_source_dimensions,
+            aspect_bounds,
             capture_config: capture_api::VideoCaptureConfig {
                 source_id: self.config.video_source_id.clone(),
                 target_fps: self.config.video_encoder.fps,
@@ -608,6 +635,7 @@ impl RecorderEngine {
             stream_descriptor: worker_descriptor,
         };
         let worker_shared = VideoWorkerShared {
+            capture_target: Arc::clone(&self.capture_target),
             buffer: Arc::clone(&self.buffer),
             shutdown: Arc::clone(&self.shutdown),
             encoder_metrics: Arc::clone(&self.encoder_metrics),
@@ -648,6 +676,7 @@ impl RecorderEngine {
             let encoder_config = audio_encoder_config.clone();
             let worker_name = format!("silk-audio-worker-{}", stream_id.0);
             let worker_config = AudioWorkerConfig {
+                capture_started_at,
                 capture_config,
                 stream_id,
                 label,
@@ -792,8 +821,34 @@ struct VideoWorkerConfig {
     encoder_config: encoder_api::VideoEncoderConfig,
     scaling_plan: EngineScalingPlan,
     follow_source_dimensions: bool,
+    aspect_bounds: Option<(u32, u32)>,
     capture_config: capture_api::VideoCaptureConfig,
     stream_descriptor: StreamDescriptor,
+}
+
+/// Preserve source aspect within the requested output box, without letterboxing
+/// or cropping game content. NV12 dimensions require even pixel counts.
+fn source_output_dimensions(width: u32, height: u32, bounds: Option<(u32, u32)>) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (0, 0);
+    }
+    let (width, height) = match bounds {
+        Some((max_width, max_height))
+            if u64::from(width) * u64::from(max_height)
+                > u64::from(height) * u64::from(max_width) =>
+        {
+            (
+                max_width,
+                (u64::from(height) * u64::from(max_width) / u64::from(width)) as u32,
+            )
+        }
+        Some((_, max_height)) => (
+            (u64::from(width) * u64::from(max_height) / u64::from(height)) as u32,
+            max_height,
+        ),
+        None => (width, height),
+    };
+    (width & !1, height & !1)
 }
 
 fn resolve_video_scaling(
@@ -958,6 +1013,7 @@ fn run_video_worker(
         mut encoder_config,
         scaling_plan,
         follow_source_dimensions,
+        aspect_bounds,
         capture_config,
         mut stream_descriptor,
     } = worker_config;
@@ -967,6 +1023,7 @@ fn run_video_worker(
         encoder_metrics,
         scaling_status,
         events,
+        capture_target,
     } = worker_shared.clone();
 
     let mut scaling_mode = match resolve_video_scaling(
@@ -1003,14 +1060,22 @@ fn run_video_worker(
 
     let mut primed_reported = false;
     let mut encoder_epoch = encoder.epoch();
-    let mut timeline = VideoTimeline::default();
+    let mut timeline = VideoTimeline::with_origin(capture_started_at);
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        match capture.next_event() {
+        let next_event = capture.next_event();
+        if let Ok(mut target) = capture_target.lock() {
+            *target = capture.active_source_id();
+        }
+        match next_event {
             Ok(VideoCaptureEvent::Frame(mut frame)) => {
-                timeline.map(&mut frame);
+                if let Some(origin) = capture.timestamp_origin() {
+                    map_capture_timestamp(&mut frame, origin, capture_started_at);
+                } else {
+                    timeline.map(&mut frame);
+                }
                 let encode_result = match scaling_mode {
                     WorkerScalingMode::Preferred2xPending { ref base_config } => {
                         let base_cfg = base_config.clone();
@@ -1054,6 +1119,7 @@ fn run_video_worker(
                                 }
                                 encoder_epoch = encoder.epoch();
                                 primed_reported = false;
+                                timeline.request_restart();
 
                                 if let Ok(mut status) = scaling_status.lock() {
                                     *status = VideoScalingStatus {
@@ -1139,6 +1205,7 @@ fn run_video_worker(
                     }
                 }
             }
+            Ok(VideoCaptureEvent::Idle) => {}
             Ok(VideoCaptureEvent::FormatChanged { width, height }) => {
                 events.publish(EngineEvent::RecoveryStarted {
                     component: "display-format".to_string(),
@@ -1149,7 +1216,8 @@ fn run_video_worker(
                         "capture format changed to {width}x{height}; rebuilding video epoch"
                     ),
                 });
-                if follow_source_dimensions {
+                if follow_source_dimensions || aspect_bounds.is_some() {
+                    let (width, height) = source_output_dimensions(width, height, aspect_bounds);
                     encoder_config.width = width;
                     encoder_config.height = height;
                     if let Err(error) = encoder_config.validate() {
@@ -1187,6 +1255,7 @@ fn run_video_worker(
                         }
                         encoder_epoch = encoder.epoch();
                         primed_reported = false;
+                        timeline.request_restart();
                     }
                     Err(err) => {
                         events.publish(EngineEvent::WorkerFailed {
@@ -1213,7 +1282,14 @@ fn run_video_worker(
                     component: "display-format".to_string(),
                 });
             }
-            Ok(VideoCaptureEvent::SourceLost) => {
+            Ok(VideoCaptureEvent::SourceLost)
+            | Err(
+                capture_api::VideoCaptureError::DeviceLost
+                | capture_api::VideoCaptureError::SourceUnavailable,
+            ) => {
+                if let Ok(mut target) = capture_target.lock() {
+                    *target = None;
+                }
                 events.publish(EngineEvent::Warning {
                     code: "CAPTURE_DEVICE_LOST".to_string(),
                     message: "video source lost; attempting recovery".to_string(),
@@ -1233,14 +1309,24 @@ fn run_video_worker(
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
-                if !restart_video_capture(&mut *capture, &capture_config, &events) {
+                if let Err(error) = restart_video_capture(&mut *capture, &capture_config, &events) {
+                    let permanent = matches!(
+                        error,
+                        capture_api::VideoCaptureError::PermissionDenied
+                            | capture_api::VideoCaptureError::InvalidConfiguration { .. }
+                    );
                     events.publish(EngineEvent::WorkerFailed {
-                        code: "CAPTURE_RECOVERY_EXHAUSTED".to_string(),
-                        message: "video source recovery exhausted".to_string(),
+                        code: if permanent {
+                            error.code()
+                        } else {
+                            "CAPTURE_RECOVERY_EXHAUSTED"
+                        }
+                        .to_string(),
+                        message: format!("video source recovery stopped: {error}"),
                     });
                     break;
                 }
-                timeline.restarted(capture_started_at.elapsed());
+                timeline.request_restart();
                 match resolve_video_scaling(
                     &*capture,
                     encoder,
@@ -1335,6 +1421,9 @@ fn run_video_worker(
     publish_encoder_events(encoder, &events);
     publish_encoder_metrics(&encoder_metrics, encoder);
     log_encoder_metrics(encoder);
+    if let Ok(mut target) = capture_target.lock() {
+        *target = None;
+    }
     let _ = capture.stop();
 }
 
@@ -1342,7 +1431,7 @@ fn restart_video_capture(
     capture: &mut dyn VideoCapture,
     config: &capture_api::VideoCaptureConfig,
     events: &EngineEventPublisher,
-) -> bool {
+) -> capture_api::Result<()> {
     let _ = capture.stop();
     for attempt in 1..=VIDEO_RESTART_LIMIT {
         std::thread::sleep(Duration::from_millis(50 * u64::from(attempt)));
@@ -1352,10 +1441,15 @@ fn restart_video_capture(
                     "capture",
                     &format!("display capture recovered on attempt {attempt}"),
                 );
-                return true;
+                return Ok(());
             }
             Err(error) => {
                 let exhausted = attempt == VIDEO_RESTART_LIMIT;
+                let permanent = matches!(
+                    error,
+                    capture_api::VideoCaptureError::PermissionDenied
+                        | capture_api::VideoCaptureError::InvalidConfiguration { .. }
+                );
                 diagnostics::warn(
                     "capture",
                     &format!(
@@ -1363,12 +1457,14 @@ fn restart_video_capture(
                     ),
                 );
                 events.publish(EngineEvent::Warning {
-                    code: if exhausted {
+                    code: if exhausted && !permanent {
                         "CAPTURE_RECOVERY_EXHAUSTED".to_string()
                     } else {
                         error.code().to_string()
                     },
-                    message: if exhausted {
+                    message: if permanent {
+                        format!("video capture recovery stopped without further retries: {error}")
+                    } else if exhausted {
                         format!(
                             "display capture recovery exhausted after {attempt} attempts: {error}"
                         )
@@ -1377,10 +1473,13 @@ fn restart_video_capture(
                     },
                 });
                 let _ = capture.stop();
+                if permanent || exhausted {
+                    return Err(error);
+                }
             }
         }
     }
-    false
+    Err(capture_api::VideoCaptureError::SourceUnavailable)
 }
 
 fn drain_video_encoder_into_buffer(
@@ -1440,6 +1539,7 @@ fn run_audio_worker(
     worker_shared: AudioWorkerShared,
 ) {
     let AudioWorkerConfig {
+        capture_started_at,
         capture_config,
         stream_id,
         label,
@@ -1507,27 +1607,34 @@ fn run_audio_worker(
         match capture.next_event() {
             Ok(AudioCaptureEvent::Frames(mut frame)) => {
                 frame.stream_id = stream_id;
+                let captured_at = capture.capture_instant(&frame);
                 match synchronizer.process(frame) {
-                    Ok(frame) => match encoder.encode(frame) {
-                        Ok(packets) => {
-                            if let Some(message) = insert_packets(&buffer, packets) {
+                    Ok(mut frame) => {
+                        if let Some(captured_at) = captured_at {
+                            frame.pts = signed_elapsed_ms(captured_at, capture_started_at).max(0);
+                            frame.time_base = TimeBase::MILLISECOND;
+                        }
+                        match encoder.encode(frame) {
+                            Ok(packets) => {
+                                if let Some(message) = insert_packets(&buffer, packets) {
+                                    events.publish(EngineEvent::Warning {
+                                        code: "BUFFER_INSERT_FAILED".to_string(),
+                                        message: format!("{label} audio: {message}"),
+                                    });
+                                    break;
+                                }
+                                restart_attempts = 0;
+                                publish_audio_metrics(&sync_metrics, stream_id, &synchronizer);
+                            }
+                            Err(error) => {
                                 events.publish(EngineEvent::Warning {
-                                    code: "BUFFER_INSERT_FAILED".to_string(),
-                                    message: format!("{label} audio: {message}"),
+                                    code: error.code().to_string(),
+                                    message: format!("{label} audio encode failed: {error}"),
                                 });
                                 break;
                             }
-                            restart_attempts = 0;
-                            publish_audio_metrics(&sync_metrics, stream_id, &synchronizer);
                         }
-                        Err(error) => {
-                            events.publish(EngineEvent::Warning {
-                                code: error.code().to_string(),
-                                message: format!("{label} audio encode failed: {error}"),
-                            });
-                            break;
-                        }
-                    },
+                    }
                     Err(error) => {
                         events.publish(EngineEvent::Warning {
                             code: "AUDIO_SYNC_FAILURE".to_string(),
@@ -1793,6 +1900,16 @@ fn log_encoder_metrics(encoder: &dyn VideoEncoder) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_aspect_fits_game_output_without_monitor_bars() {
+        use super::source_output_dimensions as size;
+        assert_eq!(size(1440, 1080, Some((1920, 1080))), (1440, 1080));
+        assert_eq!(size(2560, 1080, Some((1920, 1080))), (1920, 810));
+        assert_eq!(size(1080, 1920, Some((1920, 1080))), (606, 1080));
+        assert_eq!(size(1365, 767, None), (1364, 766));
+        assert_eq!(size(0, 1080, None), (0, 0));
+        assert_eq!(size(1920, 0, Some((1920, 1080))), (0, 0));
+    }
     use super::*;
     use std::collections::VecDeque;
     use std::time::Instant;
@@ -2197,6 +2314,7 @@ mod tests {
         frames: VecDeque<VideoCaptureEvent>,
         started: bool,
         has_gpu: bool,
+        error_once: bool,
     }
 
     impl ScalingMockCapture {
@@ -2205,6 +2323,7 @@ mod tests {
                 frames: frames.into(),
                 started: false,
                 has_gpu: true,
+                error_once: false,
             }
         }
 
@@ -2213,6 +2332,7 @@ mod tests {
                 frames: frames.into(),
                 started: false,
                 has_gpu: false,
+                error_once: false,
             }
         }
     }
@@ -2238,6 +2358,10 @@ mod tests {
                 return Err(VideoCaptureError::Backend {
                     details: "not started".to_string(),
                 });
+            }
+            if self.error_once {
+                self.error_once = false;
+                return Err(VideoCaptureError::DeviceLost);
             }
             self.frames
                 .pop_front()
@@ -2476,6 +2600,155 @@ mod tests {
                 >= 10_068
         );
         engine.stop().unwrap();
+    }
+
+    #[test]
+    fn idle_capture_events_do_not_encode_or_reconfigure_media() {
+        let capture = ScalingMockCapture::without_gpu(vec![
+            VideoCaptureEvent::Idle,
+            VideoCaptureEvent::Frame(test_video_frame(0)),
+            VideoCaptureEvent::Idle,
+            VideoCaptureEvent::Frame(test_video_frame(33)),
+            VideoCaptureEvent::Idle,
+        ]);
+        let encoder = ScalingMockEncoder::new();
+        let configurations = encoder.configured_configs.clone();
+        let mut engine = RecorderEngine::new(
+            EngineConfig::default(),
+            Box::new(capture),
+            Box::new(encoder),
+            Box::new(EngineTestMuxer),
+        );
+        engine.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !engine.worker_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(engine.worker_finished());
+        assert_eq!(configurations.lock().unwrap().len(), 1);
+        assert_eq!(engine.buffered_packet_count(), 2);
+        engine.stop().unwrap();
+    }
+
+    #[test]
+    fn typed_device_loss_uses_bounded_source_recovery_instead_of_worker_failure() {
+        let mut capture = ScalingMockCapture::without_gpu(vec![
+            VideoCaptureEvent::Frame(test_video_frame(0)),
+            VideoCaptureEvent::Frame(test_video_frame(33)),
+        ]);
+        capture.error_once = true;
+        let encoder = ScalingMockEncoder::new();
+        let configurations = encoder.configured_configs.clone();
+        let mut engine = RecorderEngine::new(
+            EngineConfig::default(),
+            Box::new(capture),
+            Box::new(encoder),
+            Box::new(EngineTestMuxer),
+        );
+        engine.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !engine.worker_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(engine.worker_finished());
+        assert_eq!(engine.buffered_packet_count(), 2);
+        assert_eq!(
+            configurations.lock().unwrap().len(),
+            2,
+            "typed loss did not rebuild encoder context"
+        );
+        let events = engine.pump();
+        assert!(events.iter().any(|event|matches!(event,EngineEvent::Warning {code,..} if code=="CAPTURE_DEVICE_LOST")),"{events:?}");
+        assert!(!events.iter().any(|event|matches!(event,EngineEvent::WorkerFailed {code,..} if code=="CAPTURE_DEVICE_LOST")),"{events:?}");
+        engine.stop().unwrap();
+    }
+
+    #[test]
+    fn permanent_capture_denial_during_recovery_is_not_retried_or_hidden() {
+        struct DeniedCapture {
+            starts: Arc<std::sync::atomic::AtomicUsize>,
+            configs: Arc<Mutex<Vec<VideoCaptureConfig>>>,
+            invalid: bool,
+        }
+        impl VideoCapture for DeniedCapture {
+            fn enumerate_sources(&self) -> capture_api::Result<Vec<VideoSourceInfo>> {
+                Ok(vec![VideoSourceInfo {
+                    id: "game:pid:123:created:456:hwnd:789".into(),
+                    name: "Explicit selected test game".into(),
+                    is_primary: false,
+                    width: 1920,
+                    height: 1080,
+                }])
+            }
+            fn start(&mut self, config: VideoCaptureConfig) -> capture_api::Result<()> {
+                self.configs.lock().unwrap().push(config);
+                if self.starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Ok(());
+                }
+                if self.invalid {
+                    Err(VideoCaptureError::InvalidConfiguration {
+                        reason: "selected identity cannot be used".into(),
+                    })
+                } else {
+                    Err(VideoCaptureError::PermissionDenied)
+                }
+            }
+            fn next_event(&mut self) -> capture_api::Result<VideoCaptureEvent> {
+                Err(VideoCaptureError::DeviceLost)
+            }
+            fn stop(&mut self) -> capture_api::Result<()> {
+                Ok(())
+            }
+        }
+        for invalid in [false, true] {
+            let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let configs = Arc::new(Mutex::new(Vec::new()));
+            let source = "game:pid:123:created:456:hwnd:789";
+            let mut engine = RecorderEngine::new(
+                EngineConfig {
+                    video_source_id: source.into(),
+                    ..Default::default()
+                },
+                Box::new(DeniedCapture {
+                    starts: starts.clone(),
+                    configs: configs.clone(),
+                    invalid,
+                }),
+                Box::new(ScalingMockEncoder::new()),
+                Box::new(EngineTestMuxer),
+            );
+            engine.start().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !engine.worker_finished() && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(engine.worker_finished());
+            assert_eq!(
+                starts.load(Ordering::SeqCst),
+                2,
+                "permanent rejection was retried"
+            );
+            assert!(configs
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|config| config.source_id == source));
+            let events = engine.pump();
+            let expected = if invalid {
+                "CAPTURE_INVALID_CONFIGURATION"
+            } else {
+                "CAPTURE_PERMISSION_DENIED"
+            };
+            assert!(
+                events.iter().any(
+                    |event| matches!(event, EngineEvent::Warning { code, .. } if code == expected)
+                ),
+                "{events:?}"
+            );
+            assert_eq!(engine.state(), RecorderState::Error);
+            assert!(!events.iter().any(|event| matches!(event, EngineEvent::WorkerFailed { code, .. } if code == "CAPTURE_RECOVERY_EXHAUSTED")), "{events:?}");
+            engine.stop().unwrap();
+        }
     }
 
     #[test]

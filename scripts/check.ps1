@@ -3,6 +3,9 @@
 
 $ErrorActionPreference = "Stop"
 
+Write-Host "== tracked test runner regressions ==" -ForegroundColor Cyan
+& "$PSScriptRoot/test-tracked-test.ps1"
+
 Write-Host "== cargo fmt ==" -ForegroundColor Cyan
 cargo fmt --all -- --check
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

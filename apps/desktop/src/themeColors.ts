@@ -3,7 +3,9 @@ import type { AppTheme, ThemeColors } from "./types";
 
 export const COLOR_FIELDS = [
   ["main", "Main color"], ["background", "Background color"], ["text", "Text color"],
-  ["subtext", "Subtext color"], ["capture", "Capture color"], ["replayBuffer", "Replay buffer color"],
+  ["subtext", "Subtext color"], ["capture", "Buffering and ready text"], ["replayBuffer", "Replay buffer color"],
+  ["clipSaved", "Clip saved text and badge"], ["clipSavedBackground", "Clip saved background"],
+  ["overlayAccent", "Overlay accent"], ["overlayBackground", "Overlay background"], ["overlayText", "Overlay text"],
 ] as const;
 
 export function defaultColors(theme: AppTheme): Required<ThemeColors> {
@@ -11,7 +13,21 @@ export function defaultColors(theme: AppTheme): Required<ThemeColors> {
     studio: ["#efefed", "#080808", "#efefed"], classic: ["#e4d29b", "#10110e", "#dfd497"],
     ember: ["#eab17c", "#140f0c", "#e9b079"], vamp: ["#eaa5b0", "#100d11", "#ed939e"],
   }[theme];
-  return {main, background, text: "#f2f2f0", subtext: "#ababaa", capture: theme === "studio" ? main : "#75d5b2", replayBuffer: signal};
+  return {main, background, text: "#f2f2f0", subtext: "#ababaa", capture: main, replayBuffer: signal,
+    clipSaved: main, clipSavedBackground: background, overlayAccent: main, overlayBackground: background, overlayText: "#f2f2f0"};
+}
+
+export function resolvedColors(theme: AppTheme, colors: ThemeColors = {}): Required<ThemeColors> {
+  const result = defaultColors(theme);
+  for (const [key] of COLOR_FIELDS) if (colors[key]) result[key] = colors[key];
+  // Unspecified feedback follows the user's main/background/text overrides.
+  result.capture = colors.capture || result.main;
+  result.clipSaved = colors.clipSaved || result.main;
+  result.clipSavedBackground = colors.clipSavedBackground || result.background;
+  result.overlayAccent = colors.overlayAccent || result.main;
+  result.overlayBackground = colors.overlayBackground || result.background;
+  result.overlayText = colors.overlayText || result.text;
+  return result;
 }
 
 export function colorVariables(colors: ThemeColors = {}): CSSProperties {
@@ -38,5 +54,10 @@ export function colorVariables(colors: ThemeColors = {}): CSSProperties {
   if (valid(colors.subtext)) for (const token of ["text-soft", "text-muted", "text-dim"]) vars[`--${token}`] = colors.subtext;
   if (valid(colors.capture)) vars["--capture-color"] = colors.capture;
   if (valid(colors.replayBuffer)) vars["--signal"] = colors.replayBuffer;
+  if (valid(colors.clipSaved)) vars["--clip-saved-color"] = colors.clipSaved;
+  if (valid(colors.clipSavedBackground)) vars["--feedback-saved-bg"] = colors.clipSavedBackground;
+  if (valid(colors.overlayAccent)) vars["--overlay-accent"] = colors.overlayAccent;
+  if (valid(colors.overlayBackground)) vars["--overlay-bg"] = colors.overlayBackground;
+  if (valid(colors.overlayText)) vars["--overlay-text"] = colors.overlayText;
   return vars as CSSProperties;
 }

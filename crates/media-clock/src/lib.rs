@@ -11,6 +11,13 @@
 
 use std::time::Instant;
 
+/// Process-wide monotonic epoch used by native capture timestamps. Sampling at
+/// capture time (not worker delivery) preserves bounded-queue latency.
+pub fn capture_epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
 use media_types::TimeBase;
 use thiserror::Error;
 
@@ -117,6 +124,20 @@ impl MediaTimeline {
         Ok(shared)
     }
 
+    /// Accept a source with an unchanged clock after a forward idle gap.
+    /// Unlike resetting the timeline, this preserves elapsed time and its origin.
+    /// Backward discontinuities remain errors.
+    pub fn to_shared_allow_forward_gap(&mut self, source_ticks: i64) -> Result<i64, Discontinuity> {
+        match self.to_shared(source_ticks) {
+            Err(gap) if gap.jump_ms > 0 => {
+                self.last_shared_ms = gap.next_shared_ms;
+                self.accepted_stamps += 1;
+                Ok(gap.next_shared_ms)
+            }
+            result => result,
+        }
+    }
+
     /// Last shared stamp accepted on this timeline.
     pub fn last_shared_ms(&self) -> i64 {
         self.last_shared_ms
@@ -126,6 +147,31 @@ impl MediaTimeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forward_idle_gaps_preserve_origin_and_resume_cadence() {
+        let mut timeline = MediaTimeline::new(TimeBase::MILLISECOND, 500);
+        for (source, expected) in [
+            (100_000, 0),
+            (100_016, 16),
+            (160_000, 60_000),
+            (160_016, 60_016),
+            (360_000, 260_000),
+            (360_016, 260_016),
+        ] {
+            assert_eq!(timeline.to_shared_allow_forward_gap(source), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn forward_gap_policy_still_rejects_backward_clock_reset() {
+        let mut timeline = MediaTimeline::new(TimeBase::MILLISECOND, 500);
+        timeline.to_shared_allow_forward_gap(100_000).unwrap();
+        timeline.to_shared_allow_forward_gap(100_016).unwrap();
+        assert!(timeline.to_shared_allow_forward_gap(1).is_err());
+        assert_eq!(timeline.last_shared_ms(), 16);
+        assert_eq!(timeline.to_shared_allow_forward_gap(100_032), Ok(32));
+    }
 
     #[test]
     fn instant_clock_advances_monotonically() {

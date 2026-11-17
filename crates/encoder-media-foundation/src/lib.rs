@@ -269,6 +269,9 @@ impl MediaFoundationFactory {
     }
 }
 
+fn hardware_discovery_flags() -> MFT_ENUM_FLAG {
+    MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER
+}
 impl VideoEncoderFactory for MediaFoundationFactory {
     fn discover(&self) -> Result<Vec<EncoderCandidate>> {
         let mut state = self
@@ -279,10 +282,11 @@ impl VideoEncoderFactory for MediaFoundationFactory {
         state.activations.clear();
         let sync_flags =
             MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER;
-        // The encoder contract uses the synchronous IMFTransform pull model;
-        // asynchronous MFTs require an event-driven worker and must not be
-        // activated by this backend.
-        let hardware_flags = sync_flags | MFT_ENUM_FLAG_HARDWARE;
+        // MFT type flags are inclusive, not a hardware filter over SYNCMFT.
+        // Including SYNCMFT here also returns software transforms and would
+        // mislabel them as hardware, violating HardwareOnly policy.
+        // Hardware transforms use the existing event-driven async worker.
+        let hardware_flags = hardware_discovery_flags();
         let mut next_id = 0;
         let mut found = Vec::new();
         for (subtype, codec_name) in [
@@ -787,6 +791,7 @@ impl MediaFoundationVideoEncoder {
             ));
         }
         if self.dxgi_device_manager.is_none() {
+            self.metrics.cpu_readback_inputs = self.metrics.cpu_readback_inputs.saturating_add(1);
             let bgra = self
                 .cpu_readback
                 .read_scaled(&slot, config.width, config.height)
@@ -815,6 +820,7 @@ impl MediaFoundationVideoEncoder {
             self.gpu_converter = Some(converter);
             self.gpu_converter_input = Some(input_dimensions);
         }
+        self.metrics.gpu_surface_inputs = self.metrics.gpu_surface_inputs.saturating_add(1);
         let converted = self
             .gpu_converter
             .as_ref()
@@ -1733,6 +1739,13 @@ fn start_code_len(data: &[u8], index: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hardware_enumeration_does_not_include_software_transform_classes() {
+        let flags = super::hardware_discovery_flags().0;
+        assert_ne!(flags & super::MFT_ENUM_FLAG_HARDWARE.0, 0);
+        assert_eq!(flags & super::MFT_ENUM_FLAG_SYNCMFT.0, 0);
+        assert_eq!(flags & super::MFT_ENUM_FLAG_LOCALMFT.0, 0);
+    }
     use super::*;
 
     #[test]

@@ -14,11 +14,130 @@ use media_types::VideoSourceInfo;
 
 const DXGI_ERROR_NOT_FOUND: HRESULT = HRESULT(0x887A0002u32 as i32);
 
+/// Authoritative check for games recognized across the application.
+pub fn is_recognized_game(executable_stem: Option<&str>) -> bool {
+    executable_stem.is_some_and(|name| {
+        let lower = name.to_ascii_lowercase();
+        let stem = lower.trim_end_matches(".exe");
+        matches!(
+            stem,
+            "valorant-win64-shipping"
+                | "valorant"
+                | "cs2"
+                | "csgo"
+                | "r5apex"
+                | "r5apex_dx12"
+                | "fortniteclient-win64-shipping"
+                | "fortniteclient"
+                | "fortnitelauncher"
+                | "overwatch"
+                | "overwatch2"
+                | "rocketleague"
+                | "terraria"
+                | "helldivers2"
+                | "leagueclient"
+                | "leagueclientux"
+                | "league of legends"
+                | "destiny2"
+                | "rainbowsix"
+                | "rainbowsix_vulkan"
+                | "deadlock"
+                | "gta5"
+                | "playgtav"
+                | "robloxplayerbeta"
+                | "robloxplayer"
+                | "genshinimpact"
+                | "starrail"
+                | "zenlesszonezero"
+                | "marvelrivals-win64-shipping"
+                | "marvelrivals"
+                | "tslgame"
+                | "discovery"
+                | "discovery-d"
+                | "discovery-shipping"
+                | "discovery_shipping"
+        )
+    })
+}
+
+fn window_target_and_fullscreen(
+    hwnd: windows::Win32::Foundation::HWND,
+    window: media_types::WindowSourceInfo,
+) -> Option<(media_types::WindowSourceInfo, bool)> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONULL,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic};
+    let mut bounds = RECT::default();
+    let mut monitor = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let fullscreen = unsafe {
+        !IsIconic(hwnd).as_bool()
+            && GetWindowRect(hwnd, &mut bounds).is_ok()
+            && GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL), &mut monitor)
+                .as_bool()
+            && (bounds.left - monitor.rcMonitor.left).abs() <= 8
+            && (bounds.top - monitor.rcMonitor.top).abs() <= 8
+            && (bounds.right - monitor.rcMonitor.right).abs() <= 8
+            && (bounds.bottom - monitor.rcMonitor.bottom).abs() <= 8
+    };
+    Some((window, fullscreen))
+}
+
 /// Top visible application covering the captured display's center, in Z order.
 /// This is display attribution, not a promise of isolated process capture.
 pub fn capture_target_window(source_id: &str) -> Option<(media_types::WindowSourceInfo, bool)> {
-    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Foundation::RECT;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic};
+
+    if source_id == "game:auto" || source_id == "auto" {
+        if let Ok(windows) = enumerate_windows() {
+            // First preference: any recognized game currently in the foreground
+            for window in &windows {
+                if !is_recognized_game(window.app_name.as_deref()) {
+                    continue;
+                }
+                if let Ok(hwnd) = resolve_window(&window.id) {
+                    if let Some((pid, _, _)) = parse_window_source(&window.id) {
+                        if crate::guarded::is_window_foreground(hwnd, pid) {
+                            return window_target_and_fullscreen(hwnd, window.clone());
+                        }
+                    }
+                }
+            }
+            // Second preference: any active running recognized game
+            for window in &windows {
+                if !is_recognized_game(window.app_name.as_deref()) {
+                    continue;
+                }
+                if let Ok(hwnd) = resolve_window(&window.id) {
+                    return window_target_and_fullscreen(hwnd, window.clone());
+                }
+            }
+        }
+        return None;
+    }
+
+    let target_opt = source_id
+        .strip_prefix("game:")
+        .or_else(|| source_id.strip_prefix("game-guarded:"))
+        .or_else(|| source_id.strip_prefix("window:"))
+        .or_else(|| {
+            (source_id.starts_with("pid:") || source_id.starts_with("hwnd:")).then_some(source_id)
+        });
+
+    if let Some(target) = target_opt {
+        let hwnd = resolve_window(target).ok()?;
+        let window = enumerate_windows()
+            .ok()?
+            .into_iter()
+            .find(|window| resolve_window(&window.id).ok() == Some(hwnd))?;
+        return window_target_and_fullscreen(hwnd, window);
+    }
+
     let (output, _) = resolve_source(source_id).ok()?;
     let display = unsafe { output.GetDesc().ok()? }.DesktopCoordinates;
     let center = (
@@ -26,8 +145,7 @@ pub fn capture_target_window(source_id: &str) -> Option<(media_types::WindowSour
         (display.top + display.bottom) / 2,
     );
     for window in enumerate_windows().ok()? {
-        let handle = window.id.strip_prefix("hwnd:")?.parse::<usize>().ok()?;
-        let hwnd = HWND(handle as *mut _);
+        let hwnd = resolve_window(&window.id).ok()?;
         let mut bounds = RECT::default();
         if unsafe { IsIconic(hwnd).as_bool() || GetWindowRect(hwnd, &mut bounds).is_err() } {
             continue;
@@ -37,11 +155,7 @@ pub fn capture_target_window(source_id: &str) -> Option<(media_types::WindowSour
             && bounds.top <= center.1
             && bounds.bottom > center.1
         {
-            let fullscreen = (bounds.left - display.left).abs() <= 8
-                && (bounds.top - display.top).abs() <= 8
-                && (bounds.right - display.right).abs() <= 8
-                && (bounds.bottom - display.bottom).abs() <= 8;
-            return Some((window, fullscreen));
+            return window_target_and_fullscreen(hwnd, window);
         }
     }
     None
@@ -53,7 +167,7 @@ pub struct GraphicsAdapterInfo {
     pub vendor_id: u32,
 }
 
-fn factory() -> CaptureResult<IDXGIFactory1> {
+pub(crate) fn factory() -> CaptureResult<IDXGIFactory1> {
     unsafe {
         CreateDXGIFactory1::<IDXGIFactory1>().map_err(|err| VideoCaptureError::Backend {
             details: format!("CreateDXGIFactory1 failed: {err}"),
@@ -61,7 +175,7 @@ fn factory() -> CaptureResult<IDXGIFactory1> {
     }
 }
 
-fn adapter_outputs(adapter: &IDXGIAdapter1) -> CaptureResult<Vec<IDXGIOutput>> {
+pub(crate) fn adapter_outputs(adapter: &IDXGIAdapter1) -> CaptureResult<Vec<IDXGIOutput>> {
     let mut outputs = Vec::new();
     let mut index = 0_u32;
     loop {
@@ -81,7 +195,7 @@ fn adapter_outputs(adapter: &IDXGIAdapter1) -> CaptureResult<Vec<IDXGIOutput>> {
     Ok(outputs)
 }
 
-fn describe(output: &IDXGIOutput) -> Option<DXGI_OUTPUT_DESC> {
+pub(crate) fn describe(output: &IDXGIOutput) -> Option<DXGI_OUTPUT_DESC> {
     let desc = unsafe { output.GetDesc() }.ok()?;
     if !desc.AttachedToDesktop.as_bool() {
         None
@@ -152,14 +266,13 @@ pub fn enumerate_windows() -> CaptureResult<Vec<media_types::WindowSourceInfo>> 
     use std::path::PathBuf;
     use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM, RECT};
-    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GWL_STYLE, WS_CHILD,
+        GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE, GWL_STYLE, WS_CHILD,
         WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
@@ -168,7 +281,7 @@ pub fn enumerate_windows() -> CaptureResult<Vec<media_types::WindowSourceInfo>> 
     unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let windows_list = &mut *(lparam.0 as *mut Vec<media_types::WindowSourceInfo>);
 
-        if !IsWindowVisible(hwnd).as_bool() {
+        if !IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
             return BOOL(1);
         }
 
@@ -191,16 +304,8 @@ pub fn enumerate_windows() -> CaptureResult<Vec<media_types::WindowSourceInfo>> 
             }
         }
 
-        let mut cloaked: u32 = 0;
-        let cloaked_res = DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_CLOAKED,
-            &mut cloaked as *mut _ as *mut core::ffi::c_void,
-            std::mem::size_of::<u32>() as u32,
-        );
-        if cloaked_res.is_ok() && cloaked != 0 {
-            return BOOL(1);
-        }
+        // A cloaked/minimized game can still be a useful process-bound target.
+        // List it without promising that WGC will supply frames while minimized.
 
         let title_len = GetWindowTextLengthW(hwnd);
         if title_len <= 0 {
@@ -226,6 +331,12 @@ pub fn enumerate_windows() -> CaptureResult<Vec<media_types::WindowSourceInfo>> 
 
         let mut process_id = 0_u32;
         let _ = GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+        if process_id == 0 || process_id == std::process::id() {
+            return BOOL(1);
+        }
+        let Ok(created) = process_creation_time(process_id) else {
+            return BOOL(1);
+        };
         let mut app_name = None;
         if process_id != 0 {
             if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) {
@@ -253,7 +364,14 @@ pub fn enumerate_windows() -> CaptureResult<Vec<media_types::WindowSourceInfo>> 
             }
         }
 
-        let id = format!("hwnd:{}", hwnd.0 as usize);
+        if is_picker_system_utility(app_name.as_deref()) {
+            return BOOL(1);
+        }
+
+        let id = format!(
+            "pid:{process_id}:created:{created}:hwnd:{}",
+            hwnd.0 as usize
+        );
         windows_list.push(media_types::WindowSourceInfo {
             id,
             title,
@@ -271,6 +389,127 @@ pub fn enumerate_windows() -> CaptureResult<Vec<media_types::WindowSourceInfo>> 
     }
 
     Ok(windows_list)
+}
+
+/// Picker hygiene only, not a security boundary or a game classifier. Use exact
+/// executable stems rather than localized titles or broad "Host" matching.
+fn is_picker_system_utility(executable_stem: Option<&str>) -> bool {
+    executable_stem.is_some_and(|name| {
+        [
+            "TextInputHost",
+            "InputApp",
+            "ShellExperienceHost",
+            "StartMenuExperienceHost",
+            "SearchHost",
+            "SearchApp",
+            "LockApp",
+        ]
+        .iter()
+        .any(|utility| name.eq_ignore_ascii_case(utility))
+    })
+}
+
+/// Resolve a selected window, rejecting stale handles reassigned to another process.
+pub(crate) fn resolve_window(source: &str) -> CaptureResult<windows::Win32::Foundation::HWND> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+    let (expected_pid, expected_creation, handle) = parse_window_source(source).ok_or_else(|| {
+        VideoCaptureError::InvalidConfiguration {
+            reason: "Reselect the running game/application window to bind its process lifetime; legacy HWND/PID-only selections and automatic monitor capture are not permitted in game/window mode".into(),
+        }
+    })?;
+    let hwnd = HWND(handle as *mut _);
+    let mut pid = 0;
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return Err(VideoCaptureError::SourceUnavailable);
+        }
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    if pid == 0
+        || pid == std::process::id()
+        || expected_pid != pid
+        || process_creation_time(pid)? != expected_creation
+    {
+        return Err(VideoCaptureError::SourceUnavailable);
+    }
+    Ok(hwnd)
+}
+
+pub(crate) fn parse_window_source(source: &str) -> Option<(u32, u64, usize)> {
+    if source.len() > 96 {
+        return None;
+    }
+    let rest = source.strip_prefix("pid:")?;
+    let (pid, rest) = rest.split_once(":created:")?;
+    let (created, handle) = rest.split_once(":hwnd:")?;
+    if [pid, created, handle]
+        .iter()
+        .any(|field| field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let pid = pid.parse::<u32>().ok().filter(|pid| *pid != 0)?;
+    let created = created
+        .parse::<u64>()
+        .ok()
+        .filter(|created| *created != 0)?;
+    let handle = handle.parse::<usize>().ok().filter(|handle| *handle != 0)?;
+    Some((pid, created, handle))
+}
+
+pub(crate) fn process_creation_time(pid: u32) -> CaptureResult<u64> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::Win32::Foundation::{FILETIME, HANDLE};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .map_err(|_| VideoCaptureError::SourceUnavailable)?;
+    let process = unsafe { OwnedHandle::from_raw_handle(raw.0) };
+    let (mut created, mut exited, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    unsafe {
+        GetProcessTimes(
+            HANDLE(process.as_raw_handle()),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    }
+    .map_err(|_| VideoCaptureError::SourceUnavailable)?;
+    let created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    if created == 0 {
+        return Err(VideoCaptureError::SourceUnavailable);
+    }
+    Ok(created)
+}
+
+pub(crate) fn capture_affinity_denied(affinity: Option<u32>) -> bool {
+    matches!(affinity, Some(1 | 17))
+}
+
+/// Honor the application's existing OS exclusion. Query failure is not permission
+/// to bypass it: ordinary WGC still decides support, with no monitor fallback.
+pub(crate) fn check_window_capture_affinity(
+    hwnd: windows::Win32::Foundation::HWND,
+) -> CaptureResult<()> {
+    let mut affinity = 0;
+    let observed = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetWindowDisplayAffinity(hwnd, &mut affinity)
+    }
+    .ok()
+    .map(|()| affinity);
+    if capture_affinity_denied(observed) {
+        diagnostics::warn("wgc",&format!("selected window excludes OS capture via display affinity ({affinity:#x}); no capture or monitor fallback"));
+        return Err(VideoCaptureError::PermissionDenied);
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -391,5 +630,144 @@ pub(crate) fn foreground_monitor() -> Option<isize> {
         }
         let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
         (!monitor.0.is_null()).then_some(monitor.0 as isize)
+    }
+}
+
+#[cfg(test)]
+mod window_identity_tests {
+    use super::{capture_affinity_denied, is_picker_system_utility, parse_window_source};
+    #[test]
+    fn window_picker_hides_known_windows_input_and_shell_helpers() {
+        for name in [
+            "TextInputHost",
+            "textinputhost",
+            "TEXTINPUTHOST",
+            "InputApp",
+            "ShellExperienceHost",
+            "StartMenuExperienceHost",
+            "SearchHost",
+            "SearchApp",
+            "LockApp",
+        ] {
+            assert!(is_picker_system_utility(Some(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn window_picker_keeps_games_apps_and_generic_application_hosts() {
+        for name in [
+            None,
+            Some(""),
+            Some("VALORANT-Win64-Shipping"),
+            Some("cs2"),
+            Some("unknown-game"),
+            Some("ApplicationFrameHost"),
+            Some("explorer"),
+            Some("ScreenSketch"),
+            Some("notepad"),
+            Some("Discord"),
+            Some("brave"),
+            Some("TextInputHostGame"),
+            Some("MySearchApp"),
+        ] {
+            assert!(!is_picker_system_utility(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn recognized_games_matches_known_titles_and_rejects_desktop_shells() {
+        for game in [
+            "VALORANT-Win64-Shipping",
+            "valorant",
+            "cs2",
+            "r5apex",
+            "FortniteClient-Win64-Shipping",
+            "Overwatch",
+            "RocketLeague",
+            "Terraria",
+            "helldivers2",
+            "Discovery-D",
+        ] {
+            assert!(super::is_recognized_game(Some(game)), "{game}");
+        }
+        for not_game in [
+            None,
+            Some("explorer"),
+            Some("chrome"),
+            Some("Discord"),
+            Some("TextInputHost"),
+        ] {
+            assert!(!super::is_recognized_game(not_game), "{not_game:?}");
+        }
+    }
+
+    #[test]
+    fn automatic_game_target_never_resolves_to_desktop_shell() {
+        if let Some((target, _fullscreen)) = super::capture_target_window("game:auto") {
+            assert_ne!(target.app_name.as_deref(), Some("explorer"));
+            assert!(super::is_recognized_game(target.app_name.as_deref()));
+        }
+    }
+
+    #[test]
+    #[ignore = "enumerates the interactive desktop; optional SILK_PICKER_EXPECT_APP requires a live target"]
+    fn native_window_picker_filters_helpers_and_keeps_expected_app() {
+        let sources = super::enumerate_windows().unwrap();
+        assert!(
+            !sources.is_empty(),
+            "No live application windows available for verification"
+        );
+        for source in &sources {
+            assert!(!is_picker_system_utility(source.app_name.as_deref()));
+            assert!(parse_window_source(&source.id).is_some());
+        }
+        if let Ok(expected) = std::env::var("SILK_PICKER_EXPECT_APP") {
+            assert!(
+                sources.iter().any(|source| source
+                    .app_name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&expected))),
+                "Expected running app was missing from picker: {expected}"
+            );
+        }
+        println!(
+            "Native picker verified: {} application windows; system helpers absent",
+            sources.len()
+        );
+    }
+
+    #[test]
+    fn application_capture_exclusions_are_respected() {
+        assert!(!capture_affinity_denied(None));
+        assert!(!capture_affinity_denied(Some(0)));
+        assert!(capture_affinity_denied(Some(1)));
+        assert!(capture_affinity_denied(Some(17)));
+    }
+
+    #[test]
+    fn window_identity_is_strict_and_preserves_process_binding() {
+        assert_eq!(
+            parse_window_source("pid:42:created:123:hwnd:120"),
+            Some((42, 123, 120))
+        );
+        assert_eq!(parse_window_source("hwnd:120"), None);
+        for source in [
+            "auto",
+            "pid:0:hwnd:120",
+            "pid:42:hwnd:0",
+            "pid:42:hwnd:x",
+            "hwnd:0",
+            "hwnd:-1",
+            "pid:42:hwnd:120",
+            "pid:42:created:0:hwnd:120",
+            "pid:0:created:123:hwnd:120",
+            "pid:42:created:123:hwnd:0",
+            "pid:42:created:123:hwnd:120:extra",
+            "pid:+42:created:123:hwnd:120",
+            "pid:42:created:+123:hwnd:120",
+            "pid:42:created:18446744073709551616:hwnd:120",
+        ] {
+            assert_eq!(parse_window_source(source), None, "{source}");
+        }
     }
 }

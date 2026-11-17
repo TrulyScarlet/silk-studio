@@ -81,6 +81,15 @@ const TIMER_ID_HOLD: usize = 1;
 const TIMER_ID_EXIT: usize = 2;
 
 #[inline]
+fn palette_color(rgb: [u8; 3], alpha: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: f32::from(rgb[0]) / 255.0,
+        g: f32::from(rgb[1]) / 255.0,
+        b: f32::from(rgb[2]) / 255.0,
+        a: alpha,
+    }
+}
+
 const fn pt(x: f32, y: f32) -> Vector2 {
     Vector2 { X: x, Y: y }
 }
@@ -212,50 +221,21 @@ impl PreallocatedResources {
         d2d_context: &ID2D1DeviceContext,
         d2d_factory: &ID2D1Factory,
         dcomp_device: &IDCompositionDevice,
+        palette: HudPalette,
     ) -> Result<Self, HudError> {
         let render_target: ID2D1RenderTarget = d2d_context
             .cast()
             .map_err(|e| HudError::Direct2DFailed(e.to_string()))?;
 
-        // 1. Background Gradients
-        let queued_stops = [
+        // 1. Theme backgrounds are flat; semantic errors retain their own brush.
+        let themed_stops = [
             D2D1_GRADIENT_STOP {
                 position: 0.0,
-                color: D2D1_COLOR_F {
-                    r: 0.1255,
-                    g: 0.1333,
-                    b: 0.0902,
-                    a: 0.960,
-                },
+                color: palette_color(palette.background, 1.0),
             },
             D2D1_GRADIENT_STOP {
                 position: 1.0,
-                color: D2D1_COLOR_F {
-                    r: 0.0627,
-                    g: 0.0667,
-                    b: 0.0471,
-                    a: 0.970,
-                },
-            },
-        ];
-        let saved_stops = [
-            D2D1_GRADIENT_STOP {
-                position: 0.0,
-                color: D2D1_COLOR_F {
-                    r: 0.0706,
-                    g: 0.1333,
-                    b: 0.0863,
-                    a: 0.960,
-                },
-            },
-            D2D1_GRADIENT_STOP {
-                position: 1.0,
-                color: D2D1_COLOR_F {
-                    r: 0.0392,
-                    g: 0.0784,
-                    b: 0.0510,
-                    a: 0.970,
-                },
+                color: palette_color(palette.background, 1.0),
             },
         ];
         let failed_stops = [
@@ -280,10 +260,10 @@ impl PreallocatedResources {
         ];
 
         let queued_stop_coll = render_target
-            .CreateGradientStopCollection(&queued_stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+            .CreateGradientStopCollection(&themed_stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
             .map_err(|e| HudError::Direct2DFailed(e.to_string()))?;
         let saved_stop_coll = render_target
-            .CreateGradientStopCollection(&saved_stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+            .CreateGradientStopCollection(&themed_stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
             .map_err(|e| HudError::Direct2DFailed(e.to_string()))?;
         let failed_stop_coll = render_target
             .CreateGradientStopCollection(&failed_stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
@@ -527,6 +507,22 @@ impl PreallocatedResources {
                 None,
             )
             .map_err(|e| HudError::Direct2DFailed(e.to_string()))?;
+
+        // Apply the immutable session palette once before the first render.
+        // Error brushes retain semantic failure colors, never success green.
+        queued_border_brush.SetColor(&palette_color(palette.accent, 0.4));
+        saved_border_brush.SetColor(&palette_color(palette.accent, 0.48));
+        queued_badge_fill_brush.SetColor(&palette_color(palette.accent, 0.12));
+        saved_badge_fill_brush.SetColor(&palette_color(palette.accent, 1.0));
+        queued_badge_border_brush.SetColor(&palette_color(palette.accent, 0.24));
+        queued_track_brush.SetColor(&palette_color(palette.accent, 0.18));
+        queued_arc_brush.SetColor(&palette_color(palette.accent, 0.92));
+        queued_dot_brush.SetColor(&palette_color(palette.accent, 0.85));
+        saved_ink_brush.SetColor(&palette_color(palette.badge_ink(), 1.0));
+        queued_title_brush.SetColor(&palette_color(palette.text, 1.0));
+        saved_title_brush.SetColor(&palette_color(palette.text, 1.0));
+        queued_subtitle_brush.SetColor(&palette_color(palette.text, 0.8));
+        saved_subtitle_brush.SetColor(&palette_color(palette.text, 0.8));
 
         // 7. Stroke Style
         let stroke_props = D2D1_STROKE_STYLE_PROPERTIES {
@@ -1157,8 +1153,12 @@ impl HudThreadContext {
         }
 
         // Pre-allocate all static Direct2D brushes, geometries, stroke styles, and DComp animations
-        let resources = match PreallocatedResources::init(&d2d_context, &d2d_factory, &dcomp_device)
-        {
+        let resources = match PreallocatedResources::init(
+            &d2d_context,
+            &d2d_factory,
+            &dcomp_device,
+            config.palette,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 d2d_context.SetTarget(None);
@@ -2214,6 +2214,83 @@ mod lifecycle_tests {
     use super::*;
 
     #[test]
+    fn palette_badges_keep_contrasting_ink() {
+        assert_eq!(
+            HudPalette {
+                accent: [255, 255, 255],
+                ..Default::default()
+            }
+            .badge_ink(),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            HudPalette {
+                accent: [0, 0, 0],
+                ..Default::default()
+            }
+            .badge_ink(),
+            [255, 255, 255]
+        );
+    }
+
+    #[test]
+    #[ignore = "creates real Direct2D/DirectComposition resources; interactive Windows desktop required"]
+    fn themed_brushes_render_in_full_and_compact_modes() {
+        std::thread::spawn(|| {
+            let _com = ComApartmentGuard::new().unwrap();
+            let _dpi = DpiAwarenessGuard::new();
+            for accent in [
+                [239, 239, 237],
+                [228, 210, 155],
+                [234, 177, 124],
+                [234, 165, 176],
+                [127, 183, 230],
+            ] {
+                for mode in [HudMode::Full, HudMode::Compact] {
+                    let palette = HudPalette {
+                        accent,
+                        background: [22, 28, 37],
+                        text: [220, 236, 255],
+                    };
+                    let (_tx, rx) = std::sync::mpsc::sync_channel(HUD_COMMAND_QUEUE_BOUND);
+                    let (mut context, _, _) = unsafe {
+                        HudThreadContext::init(
+                            HudConfig {
+                                mode,
+                                palette,
+                                ..Default::default()
+                            },
+                            DiagnosticLifecyclePolicy::default(),
+                            rx,
+                        )
+                    }
+                    .unwrap();
+                    unsafe {
+                        let actual = context.resources.saved_badge_fill_brush.GetColor();
+                        let expected = palette_color(accent, 1.0);
+                        assert_eq!(
+                            (actual.r, actual.g, actual.b, actual.a),
+                            (expected.r, expected.g, expected.b, expected.a)
+                        );
+                        let text = context.resources.saved_title_brush.GetColor();
+                        let expected_text = palette_color(palette.text, 1.0);
+                        assert_eq!(
+                            (text.r, text.g, text.b),
+                            (expected_text.r, expected_text.g, expected_text.b)
+                        );
+                        context
+                            .render_cue(&HudCue::saved(15_000, 1_000_000))
+                            .unwrap();
+                        context.teardown();
+                    }
+                }
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
     fn stale_and_duplicate_timers_cannot_expire_a_replacement_cue() {
         let start = Instant::now();
         let mut deadline = Some(start + Duration::from_secs(3));
@@ -2237,6 +2314,11 @@ mod lifecycle_tests {
         for mode in [HudMode::Full, HudMode::Compact] {
             let hud = NativeHud::try_new(HudConfig {
                 mode,
+                palette: HudPalette {
+                    accent: [127, 183, 230],
+                    background: [22, 28, 37],
+                    text: [220, 236, 255],
+                },
                 ..Default::default()
             })
             .unwrap();

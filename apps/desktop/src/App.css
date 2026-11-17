@@ -44,8 +44,12 @@
   --status-card-ambient: var(--surface);
   --feedback-banner-bg: var(--surface-raised);
   --feedback-saving-bg: var(--surface-raised);
-  --feedback-saved-bg: var(--success-soft);
-  --feedback-saved-title: var(--text);
+  --clip-saved-color: var(--accent);
+  --feedback-saved-bg: var(--bg);
+  --feedback-saved-title: var(--clip-saved-color);
+  --overlay-accent: var(--accent);
+  --overlay-bg: var(--bg);
+  --overlay-text: var(--text);
   --feedback-error-bg: var(--danger-soft);
   --feedback-error-title: var(--text);
   --gauge-fill-gradient: var(--signal);
@@ -66,7 +70,7 @@
   --meta-stat-value: var(--text);
 }
 [data-theme="classic"] {
-  --capture-color: var(--success);
+  --capture-color: var(--accent);
   --bg: #10110e;
   --bg-deep: #080907;
   --surface: #1b1d17;
@@ -82,7 +86,7 @@
   --signal: #dfd497;
 }
 [data-theme="ember"] {
-  --capture-color: var(--success);
+  --capture-color: var(--accent);
   --bg: #140f0c;
   --bg-deep: #0a0706;
   --surface: #211914;
@@ -98,7 +102,7 @@
   --signal: #e9b079;
 }
 [data-theme="vamp"] {
-  --capture-color: var(--success);
+  --capture-color: var(--accent);
   --bg: #100d11;
   --bg-deep: #070608;
   --surface: #1e1920;
@@ -1111,7 +1115,7 @@ h2 {
 }
 
 .feedback-saved {
-  border-color: var(--success-line);
+  border-color: var(--clip-saved-color);
   background: var(--feedback-saved-bg);
 }
 
@@ -1149,7 +1153,7 @@ h2 {
   width: 26px;
   height: 26px;
   border-radius: 8px;
-  background: var(--success);
+  background: var(--clip-saved-color);
   color: var(--bg-deep);
   font-size: 13px;
   font-weight: 600;
@@ -1323,9 +1327,9 @@ h2 {
 }
 
 .state-ready {
-  border-color: var(--success-line);
-  background: var(--success-soft);
-  color: var(--success);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--capture-color);
 }
 
 .state-buffering {
@@ -1864,6 +1868,26 @@ h2 {
 .directory-control .button,
 .target-control .button {
   flex: 0 0 auto;
+}
+
+.capture-help {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.capture-help p {
+  margin: 0 0 8px;
+}
+
+.capture-help summary {
+  width: fit-content;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.capture-help details[open] summary {
+  margin-bottom: 8px;
 }
 
 .readonly-target-input {
@@ -6565,10 +6589,16 @@ html:has(.clip-modal-backdrop), body:has(.clip-modal-backdrop) {
 .custom-color-field > span { flex: 1; }
 .custom-color-field input[type=color] { width: 40px; height: 32px; border: 1px solid var(--accent-line); padding: 2px; background: var(--surface); cursor: pointer; }
 .custom-theme-preview { padding: 20px; margin: 20px 0; border: 1px solid var(--accent-line); background: var(--bg); color: var(--text); border-radius: 8px; }
+.custom-theme-preview strong { overflow-wrap: anywhere; }
 .custom-theme-preview small, .custom-theme-preview p { color: var(--text-muted); }
 .custom-theme-preview .theme-preview-progress { margin: 10px 0 20px; }
-.custom-preview-capture { float: right; font-size: 12px; color: var(--capture-color, var(--success)); }
-.state-ready, .state-buffering { color: var(--capture-color, var(--success)); }
+.custom-preview-capture { float: right; font-size: 12px; color: var(--capture-color, var(--accent)); }
+.state-ready, .state-buffering { color: var(--capture-color, var(--accent)); }
+.theme-preset-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.custom-preview-saved { margin-top: 16px; padding: 12px; background: var(--feedback-saved-bg); color: var(--clip-saved-color); border: 1px solid var(--clip-saved-color); border-radius: 8px; }
+.custom-preview-overlay { margin-top: 12px; padding: 12px; background: var(--overlay-bg); color: var(--overlay-text); border: 1px solid var(--overlay-accent); border-radius: 8px; }
+.custom-preview-overlay > span { color: var(--overlay-accent); }
+.custom-preview-overlay small { display: block; color: inherit; }
 .marker-custom-color { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); cursor: pointer; }
 .marker-custom-color input { padding: 0; width: 24px; height: 24px; background: transparent; border: none; cursor: pointer; }
 @media (max-width: 800px) { .custom-color-grid { grid-template-columns: 1fr; } }

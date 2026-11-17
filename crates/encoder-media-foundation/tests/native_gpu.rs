@@ -304,7 +304,7 @@ fn encode_with_preference(
                 packets.extend(encoder.encode(frame).expect("encode WGC GPU frame"));
                 frames += 1;
             }
-            Ok(VideoCaptureEvent::FormatChanged { .. }) => {}
+            Ok(VideoCaptureEvent::FormatChanged { .. } | VideoCaptureEvent::Idle) => {}
             Ok(VideoCaptureEvent::SourceLost) => panic!("source lost during encode"),
             Err(error) => panic!("capture error during encode: {error}"),
         }

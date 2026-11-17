@@ -1,6 +1,35 @@
 //! Fixed-size texture leases. A texture cannot be overwritten while an encoder
 //! holds it, and an old handle cannot resolve to a newer frame.
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+
+/// Counts live resources across active and retired pools, without retaining them.
+pub(crate) struct SurfaceBudget<T> {
+    limit: usize,
+    live: Vec<Weak<T>>,
+}
+impl<T> SurfaceBudget<T> {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            live: Vec::new(),
+        }
+    }
+    pub fn allocate<E>(
+        &mut self,
+        count: usize,
+        mut create: impl FnMut() -> Result<T, E>,
+    ) -> Result<Option<Vec<Arc<T>>>, E> {
+        self.live.retain(|slot| slot.strong_count() != 0);
+        if count > self.limit.saturating_sub(self.live.len()) {
+            return Ok(None);
+        }
+        let slots = (0..count)
+            .map(|_| create().map(Arc::new))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.live.extend(slots.iter().map(Arc::downgrade));
+        Ok(Some(slots))
+    }
+}
 
 pub(crate) struct LeasePool<T> {
     slots: Vec<Arc<T>>,
@@ -9,9 +38,12 @@ pub(crate) struct LeasePool<T> {
 
 impl<T> LeasePool<T> {
     pub fn new(slots: Vec<T>) -> Self {
+        Self::from_shared(slots.into_iter().map(Arc::new).collect())
+    }
+    pub fn from_shared(slots: Vec<Arc<T>>) -> Self {
         Self {
             handles: Mutex::new(vec![None; slots.len()]),
-            slots: slots.into_iter().map(Arc::new).collect(),
+            slots,
         }
     }
 
@@ -50,6 +82,48 @@ impl<T> LeasePool<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_delivered_and_resolved_owners_prevent_overwrite_and_budget_growth() {
+        let mut budget = SurfaceBudget::new(4);
+        let slots = budget.allocate(2, || Ok::<_, ()>(17)).unwrap().unwrap();
+        let first = LeasePool::from_shared(slots);
+        let (index, queued) = first.acquire().unwrap();
+        first.publish(index, 1);
+        let encoder = first.resolve(1).unwrap();
+        let (second, delivered) = first.acquire().unwrap();
+        first.publish(second, 2);
+        assert!(first.acquire().is_none());
+        drop(queued);
+        assert!(first.acquire().is_none());
+        let replacement = budget.allocate(2, || Ok::<_, ()>(99)).unwrap().unwrap();
+        assert!(budget.allocate(1, || Ok::<_, ()>(0)).unwrap().is_none());
+        first.clear();
+        assert!(first.resolve(1).is_none());
+        assert_eq!(*encoder, 17);
+        drop(first);
+        drop(delivered);
+        assert!(budget.allocate(2, || Ok::<_, ()>(0)).unwrap().is_none());
+        drop(encoder);
+        assert!(budget.allocate(2, || Ok::<_, ()>(0)).unwrap().is_some());
+        drop(replacement);
+    }
+    #[test]
+    fn failed_surface_allocation_does_not_consume_budget() {
+        let mut budget = SurfaceBudget::<u8>::new(2);
+        let mut calls = 0;
+        assert!(budget
+            .allocate(2, || {
+                calls += 1;
+                if calls == 2 {
+                    Err(())
+                } else {
+                    Ok(1)
+                }
+            })
+            .is_err());
+        assert!(budget.allocate(2, || Ok::<_, ()>(2)).unwrap().is_some());
+    }
 
     #[test]
     fn leases_bound_memory_and_prevent_overwrite() {

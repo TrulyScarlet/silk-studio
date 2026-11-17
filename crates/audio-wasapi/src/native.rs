@@ -259,6 +259,35 @@ impl SilenceClock {
     }
 }
 
+fn correlate_qpc(now: std::time::Instant, qpc_now: i64, stamp: i64) -> Option<std::time::Instant> {
+    // Endpoint timestamps may lead the sampled clock by a device period.
+    // Preserve the signed correlation instead of reverting to a zero origin.
+    let delta = stamp.checked_sub(qpc_now)?;
+    let duration = std::time::Duration::from_nanos(delta.unsigned_abs().checked_mul(100)?);
+    if delta >= 0 {
+        now.checked_add(duration)
+    } else {
+        now.checked_sub(duration)
+    }
+}
+
+#[test]
+fn endpoint_clock_lead_and_recovery_keep_elapsed_time() {
+    let start = std::time::Instant::now();
+    for elapsed in [0_u64, 3000, 6500, 12000] {
+        let now = start + std::time::Duration::from_millis(elapsed);
+        let qpc = 100_000_000 + elapsed as i64 * 10_000;
+        assert_eq!(
+            correlate_qpc(now, qpc, qpc + 100_000),
+            Some(now + std::time::Duration::from_millis(10))
+        );
+        assert_eq!(
+            correlate_qpc(now, qpc, qpc - 500_000),
+            now.checked_sub(std::time::Duration::from_millis(50))
+        );
+    }
+}
+
 fn qpc_hns() -> Result<i64> {
     let mut ticks = 0;
     let mut frequency = 0;
@@ -359,6 +388,15 @@ pub fn enumerate_devices(kind: WasapiCaptureKind) -> Result<Vec<AudioDeviceInfo>
 }
 
 impl AudioCapture for WasapiAudioCapture {
+    fn capture_instant(&self, frame: &AudioFrame) -> Option<std::time::Instant> {
+        // WASAPI QPC position is expressed in 100ns units, not device samples.
+        let now = std::time::Instant::now();
+        let qpc_now = qpc_hns().ok()?;
+        let stamp = frame
+            .time_base
+            .rescale(frame.pts, media_types::TimeBase::from_hz(10_000_000));
+        correlate_qpc(now, qpc_now, stamp)
+    }
     fn enumerate_devices(&self) -> Result<Vec<AudioDeviceInfo>> {
         enumerate_devices(self.kind)
     }

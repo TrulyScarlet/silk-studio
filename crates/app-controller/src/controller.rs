@@ -292,6 +292,10 @@ impl Controller {
     }
 
     /// Buffered video span in milliseconds for the status surface.
+    pub fn capture_target(&self) -> Option<String> {
+        self.engine.as_ref()?.capture_target()
+    }
+
     pub fn buffer_duration_ms(&self) -> i64 {
         self.engine
             .as_ref()

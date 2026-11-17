@@ -236,6 +236,41 @@ impl HudCue {
 }
 
 /// Configuration parameters for initializing the native HUD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HudPalette {
+    pub accent: [u8; 3],
+    pub background: [u8; 3],
+    pub text: [u8; 3],
+}
+
+impl Default for HudPalette {
+    fn default() -> Self {
+        Self {
+            accent: [239, 239, 237],
+            background: [8, 8, 8],
+            text: [242, 242, 240],
+        }
+    }
+}
+
+impl HudPalette {
+    pub fn badge_ink(&self) -> [u8; 3] {
+        let channels = self.accent.map(|channel| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        if channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722 > 0.179 {
+            [0, 0, 0]
+        } else {
+            [255, 255, 255]
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HudConfig {
     /// Visual layout mode (Full 320x56 capsule or Compact 180x38 pill).
@@ -244,6 +279,7 @@ pub struct HudConfig {
     pub anchor: HudAnchor,
     /// Whether to apply window display capture exclusion (`WDA_EXCLUDEFROMCAPTURE`).
     pub exclude_from_capture: bool,
+    pub palette: HudPalette,
 }
 
 impl Default for HudConfig {
@@ -252,6 +288,7 @@ impl Default for HudConfig {
             mode: HudMode::Full,
             anchor: HudAnchor::BottomCenter,
             exclude_from_capture: true,
+            palette: HudPalette::default(),
         }
     }
 }

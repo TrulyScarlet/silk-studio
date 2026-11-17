@@ -302,3 +302,56 @@ fn configuration_defaults_round_trip_through_disk() {
     assert_eq!(reloaded.settings.replay.duration_seconds, 120);
     assert_eq!(reloaded.file_version, configuration::CURRENT_CONFIG_VERSION);
 }
+
+#[test]
+fn repeated_consecutive_saves_produce_independent_valid_clips() {
+    let dir = TempDir::new("e2e-repeated-saves").expect("temp");
+    let sink_impl = Arc::new(CollectingNotificationSink::new());
+    let output_dir = dir.path().to_path_buf();
+    let sink_dyn: Arc<dyn NotificationSink> = sink_impl.clone();
+    let mut controller = Controller::with_settings(
+        Box::new(move || {
+            (
+                Box::new(
+                    ScriptedVideoCapture::new(Vec::new())
+                        .with_continuous_frames()
+                        .with_frame_delay_ms(1),
+                ) as Box<dyn capture_api::VideoCapture>,
+                Box::new(MockVideoEncoder::new()) as Box<dyn encoder_api::VideoEncoder>,
+                Box::new(MockMuxer::default()) as Box<dyn muxer::Muxer>,
+            )
+        }),
+        sink_dyn,
+        ControllerSettings {
+            output_dir,
+            ..ControllerSettings::default()
+        },
+    );
+
+    controller.execute(&Command::StartCapture);
+    let mut collected = Vec::new();
+    pump_until_ready(&mut controller, &mut collected);
+
+    let mut saved_clips = Vec::new();
+    for i in 0..5 {
+        std::thread::sleep(Duration::from_millis(50));
+        let mut save_events = controller.execute(&Command::SaveReplay);
+        pump_until_save_complete(&mut controller, &mut save_events);
+        let clip_path = save_events
+            .iter()
+            .find_map(|e| match e {
+                ControllerEvent::ClipSaved { path, .. } => Some(std::path::PathBuf::from(path)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("save iteration {i} produced no clip: {save_events:?}"));
+        assert!(clip_path.exists(), "clip file must exist");
+        saved_clips.push(clip_path);
+    }
+
+    assert_eq!(saved_clips.len(), 5);
+    let unique: std::collections::HashSet<_> = saved_clips.iter().collect();
+    assert_eq!(unique.len(), 5);
+
+    assert_eq!(controller.state(), RecorderState::Ready);
+    controller.execute(&Command::StopCapture);
+}

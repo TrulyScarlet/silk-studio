@@ -72,6 +72,10 @@ pub enum AudioCaptureEvent {
 
 /// Original interface shared by loopback and microphone capture.
 pub trait AudioCapture: Send {
+    /// Host capture instant for a source timestamp, independent of queue delay.
+    fn capture_instant(&self, _frame: &AudioFrame) -> Option<std::time::Instant> {
+        None
+    }
     fn enumerate_devices(&self) -> Result<Vec<AudioDeviceInfo>>;
     fn start(&mut self, config: AudioCaptureConfig) -> Result<()>;
     fn next_event(&mut self) -> Result<AudioCaptureEvent>;

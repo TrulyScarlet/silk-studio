@@ -11,17 +11,16 @@
 //! `FrameArrived` fires on the frame pool's internal worker thread. The
 //! handler copies each surface into a private GPU texture immediately (the
 //! immediate context runs with `ID3D11Multithread` protection) and
-//! publishes it under a unique handle in a bounded registry; oldest
-//! entries are evicted once the ring is full, so GPU memory stays constant
-//! regardless of consumer speed (S2 exit criterion).
+//! publishes a lease under a unique handle. Queued/delivered/encoder owners prevent
+//! reuse; saturation drops frames rather than overwriting. Active/retired surfaces
+//! share a fixed budget across resize and restart (S2 exit criterion).
 //!
 //! No code is injected into any process: WGC reads composited monitor
 //! content through the OS compositor (VID-011).
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -51,13 +50,17 @@ use media_clock::MediaTimeline;
 use media_types::{FramePayload, GpuFrameHandle, PixelFormat, StreamId, TimeBase, VideoFrame};
 
 use crate::device::create_capture_device;
+use crate::dxgi_pool::{LeasePool, SurfaceBudget};
 use crate::enumerate::resolve_source;
 
 const FRAME_POOL_BUFFERS: i32 = 2;
 const STAGING_RING_SIZE: usize = 8;
+const MAX_STAGING_SURFACES: usize = 16;
 /// Bounded event queue; overflow drops the newest frame (§14.1 backpressure
 /// step 4) rather than ever blocking the compositor callback.
-const EVENT_QUEUE_BOUND: usize = 64;
+// At most sixteen live publications across two eight-slot epochs. Reserve one
+// format event per epoch too, so full frame queues cannot lose a resize boundary.
+const EVENT_QUEUE_BOUND: usize = MAX_STAGING_SURFACES + MAX_STAGING_SURFACES / STAGING_RING_SIZE;
 const NEXT_EVENT_TICK_MS: u64 = 50;
 /// `TimeSpan.Duration` is expressed in Windows 100-nanosecond ticks.
 const WGC_TIMESTAMP_HZ: u32 = 10_000_000;
@@ -66,10 +69,6 @@ const WGC_TIMESTAMP_HZ: u32 = 10_000_000;
 const MAX_TIMESTAMP_JUMP_MS: i64 = 60_000;
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
-
-/// See [`GpuTextureSlot`] safety contract.
-struct SendDevice(windows::Win32::Graphics::Direct3D11::ID3D11Device);
-unsafe impl Send for SendDevice {}
 
 /// See [`GpuTextureSlot`] safety contract.
 struct SendContext(windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext);
@@ -87,21 +86,18 @@ impl SendWinrtDevice {
 
 unsafe impl Send for SendWinrtDevice {}
 
-#[derive(Debug)]
 enum InternalEvent {
     Frame {
         handle: GpuFrameHandle,
         width: u32,
         height: u32,
         source_ticks: i64,
+        publication: Arc<GpuTextureSlot>,
     },
     FormatChanged {
         width: u32,
         height: u32,
-    },
-    SourceClosed,
-    Failed {
-        details: String,
+        pool: Arc<LeasePool<GpuTextureSlot>>,
     },
 }
 
@@ -110,24 +106,35 @@ struct SessionStats {
     frames_copied: u64,
     frames_dropped_queue_full: u64,
     resizes: u64,
+    frames_dropped_pool_full: u64,
 }
 
 /// State shared with the callbacks; `Send` because every field is a lock,
 /// an atomic, or a [`GpuTextureSlot`].
 struct SharedState {
     stats: Mutex<SessionStats>,
-    registry: Mutex<(VecDeque<u64>, HashMap<u64, GpuTextureSlot>)>,
+    pool: Mutex<Option<Arc<LeasePool<GpuTextureSlot>>>>,
+    budget: Arc<Mutex<SurfaceBudget<GpuTextureSlot>>>,
+    window_target: Option<String>,
     device_context: Arc<GpuDeviceContext>,
     queue_alive: AtomicBool,
+    failure: OnceLock<String>,
 }
 
 impl SharedState {
-    fn new(device_context: Arc<GpuDeviceContext>) -> Self {
+    fn new(
+        device_context: Arc<GpuDeviceContext>,
+        budget: Arc<Mutex<SurfaceBudget<GpuTextureSlot>>>,
+        window_target: Option<String>,
+    ) -> Self {
         Self {
             stats: Mutex::new(SessionStats::default()),
-            registry: Mutex::new((VecDeque::new(), HashMap::new())),
+            pool: Mutex::new(None),
+            budget,
+            window_target,
             device_context,
             queue_alive: AtomicBool::new(true),
+            failure: OnceLock::new(),
         }
     }
 
@@ -139,35 +146,31 @@ impl SharedState {
         }
     }
 
-    fn insert_staged(&self, texture: ID3D11Texture2D) -> GpuFrameHandle {
-        let handle = GpuFrameHandle(NEXT_HANDLE.fetch_add(1, Ordering::SeqCst));
-        if let Ok(mut guard) = self.registry.lock() {
-            let (order, map) = &mut *guard;
-            map.insert(
-                handle.0,
-                GpuTextureSlot::new(texture, Arc::clone(&self.device_context)),
-            );
-            order.push_back(handle.0);
-            while order.len() > STAGING_RING_SIZE {
-                if let Some(oldest) = order.pop_front() {
-                    map.remove(&oldest);
-                }
-            }
+    fn fail(&self, details: String) {
+        let _ = self.failure.set(details);
+        self.queue_alive.store(false, Ordering::Release);
+    }
+    fn validate_capture(&self) -> CaptureResult<()> {
+        unsafe { self.device_context.device().GetDeviceRemovedReason() }
+            .map_err(|_| VideoCaptureError::DeviceLost)?;
+        if let Some(target) = &self.window_target {
+            let hwnd = crate::enumerate::resolve_window(target)?;
+            crate::enumerate::check_window_capture_affinity(hwnd)?;
         }
-        handle
+        Ok(())
     }
 
     fn release_staged(&self) {
-        if let Ok(mut guard) = self.registry.lock() {
-            guard.0.clear();
-            guard.1.clear();
+        if let Ok(mut pool) = self.pool.lock() {
+            if let Some(pool) = pool.take() {
+                pool.clear();
+            }
         }
     }
 }
 
-/// Resolves handles from one active WGC session. The staged texture is cloned
-/// into the returned type-erased resource so a lease can outlive eviction from
-/// the eight-entry registry while the encoder is using it.
+/// Resolves one active pool's handles to retained slots. The same Arc is held by
+/// events and encoder leases, so the producer cannot overwrite a live publication.
 struct WgcGpuFrameResolver {
     shared: Arc<SharedState>,
 }
@@ -185,19 +188,22 @@ impl GpuFrameResolver for WgcGpuFrameResolver {
 
         let guard =
             self.shared
-                .registry
+                .pool
                 .lock()
                 .map_err(|_| GpuFrameResolveError::ContextUnavailable {
                     details: "capture staging registry is unavailable".into(),
                 })?;
-        let Some(slot) = guard.1.get(&handle.0) else {
+        let Some(slot) = guard.as_ref().and_then(|pool| pool.resolve(handle.0)) else {
             return Err(GpuFrameResolveError::StaleHandle { handle });
         };
-        Ok(Arc::new(slot.clone()))
+        Ok(slot)
     }
 
     fn session_resource(&self) -> Option<Arc<GpuFrameResource>> {
-        Some(self.shared.device_context.clone())
+        self.shared
+            .queue_alive
+            .load(Ordering::Acquire)
+            .then(|| self.shared.device_context.clone() as Arc<GpuFrameResource>)
     }
 }
 
@@ -221,6 +227,8 @@ pub struct WgcDisplayCapture {
     timeline: MediaTimeline,
     last_source_pts: Option<i64>,
     cursor_capture: bool,
+    delivered: Option<Arc<GpuTextureSlot>>,
+    budget: Arc<Mutex<SurfaceBudget<GpuTextureSlot>>>,
 }
 
 impl WgcDisplayCapture {
@@ -240,6 +248,8 @@ impl WgcDisplayCapture {
             ),
             last_source_pts: None,
             cursor_capture: true,
+            delivered: None,
+            budget: Arc::new(Mutex::new(SurfaceBudget::new(MAX_STAGING_SURFACES))),
         }
     }
 
@@ -264,7 +274,7 @@ impl WgcDisplayCapture {
         let stats = shared.stats.lock().ok()?;
         Some((
             stats.frames_copied,
-            stats.frames_dropped_queue_full,
+            stats.frames_dropped_queue_full + stats.frames_dropped_pool_full,
             stats.resizes,
         ))
     }
@@ -277,6 +287,9 @@ impl WgcDisplayCapture {
             return None;
         }
         let shared = Arc::clone(self.shared.as_ref()?);
+        if !shared.queue_alive.load(Ordering::Acquire) {
+            return None;
+        }
         Some(GpuFrameContext::new(Arc::new(WgcGpuFrameResolver {
             shared,
         })))
@@ -317,7 +330,12 @@ impl capture_api::VideoCapture for WgcDisplayCapture {
         }
         // Validate before spawning so an invalid display id is reported from
         // start() rather than becoming an asynchronous worker warning.
-        resolve_source(&config.source_id)?;
+        if config.source_id.starts_with("hwnd:") || config.source_id.starts_with("pid:") {
+            let hwnd = crate::enumerate::resolve_window(&config.source_id)?;
+            crate::enumerate::check_window_capture_affinity(hwnd)?;
+        } else {
+            resolve_source(&config.source_id)?;
+        }
 
         // VID-004 shaping: decimate delivery when targeting 30 or 60 fps from a
         // higher-cadence compositor; 120 fps passes everything through.
@@ -344,7 +362,12 @@ impl capture_api::VideoCapture for WgcDisplayCapture {
         // capture session has no unbounded queue even during repeated teardown.
         let (control_tx, control_rx) = sync_channel::<Control>(1);
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let shared = Arc::new(SharedState::new(Arc::clone(&device_context)));
+        let shared = Arc::new(SharedState::new(
+            Arc::clone(&device_context),
+            Arc::clone(&self.budget),
+            (config.source_id.starts_with("hwnd:") || config.source_id.starts_with("pid:"))
+                .then(|| config.source_id.clone()),
+        ));
 
         let thread_shared = Arc::clone(&shared);
         let source_id = config.source_id.clone();
@@ -380,6 +403,7 @@ impl capture_api::VideoCapture for WgcDisplayCapture {
     }
 
     fn next_event(&mut self) -> CaptureResult<VideoCaptureEvent> {
+        self.delivered.take();
         let Some(events) = &mut self.events else {
             return Err(VideoCaptureError::Backend {
                 details: "capture not started".into(),
@@ -390,31 +414,57 @@ impl capture_api::VideoCapture for WgcDisplayCapture {
             if self.stop_flag.load(Ordering::SeqCst) {
                 return Err(VideoCaptureError::EndOfStream);
             }
-            match events.recv_timeout(Duration::from_millis(NEXT_EVENT_TICK_MS)) {
+            if let Some(shared) = &self.shared {
+                if let Err(error) = shared.validate_capture() {
+                    shared.queue_alive.store(false, Ordering::Release);
+                    while events.try_recv().is_ok() {}
+                    shared.release_staged();
+                    return Err(error);
+                }
+                if !shared.queue_alive.load(Ordering::Acquire) {
+                    while events.try_recv().is_ok() {}
+                    shared.release_staged();
+                    return match shared.failure.get() {
+                        Some(details) => Err(VideoCaptureError::Backend {
+                            details: details.clone(),
+                        }),
+                        None => Ok(VideoCaptureEvent::SourceLost),
+                    };
+                }
+            }
+            let event = events.recv_timeout(Duration::from_millis(NEXT_EVENT_TICK_MS));
+            if let Some(shared) = &self.shared {
+                if let Err(error) = shared.validate_capture() {
+                    shared.queue_alive.store(false, Ordering::Release);
+                    shared.release_staged();
+                    while events.try_recv().is_ok() {}
+                    return Err(error);
+                }
+            }
+            if self
+                .shared
+                .as_ref()
+                .is_some_and(|shared| !shared.queue_alive.load(Ordering::Acquire))
+            {
+                continue;
+            }
+            match event {
                 Ok(InternalEvent::Frame {
                     handle,
                     width,
                     height,
                     source_ticks,
+                    publication,
                 }) => {
-                    let pts_ms = match self.timeline.to_shared(source_ticks) {
-                        Ok(pts) => pts,
-                        Err(discontinuity) => {
-                            if discontinuity.jump_ms > 0 {
-                                // Forward jump (e.g. screen idle, locked, asleep, or monitor mode switch):
-                                // Recalibrate video timeline so capture continues seamlessly!
-                                self.timeline = MediaTimeline::new(
-                                    TimeBase::from_hz(WGC_TIMESTAMP_HZ),
-                                    MAX_TIMESTAMP_JUMP_MS,
-                                );
-                                self.timeline.to_shared(source_ticks).unwrap_or(0)
-                            } else {
-                                return Err(VideoCaptureError::Backend {
-                                    details: discontinuity.to_string(),
-                                });
-                            }
-                        }
-                    };
+                    // WGC retains its compositor clock through idle/minimize gaps.
+                    // Keep that origin: resetting to zero stalls cadence shaping
+                    // against the last delivered timestamp and loses audio alignment.
+                    let pts_ms = self
+                        .timeline
+                        .to_shared_allow_forward_gap(source_ticks)
+                        .map_err(|discontinuity| VideoCaptureError::Backend {
+                            details: discontinuity.to_string(),
+                        })?;
                     let pts_ms = if let Some(last) = self.last_source_pts {
                         pts_ms.max(last)
                     } else {
@@ -430,6 +480,7 @@ impl capture_api::VideoCapture for WgcDisplayCapture {
                         }
                         self.last_delivered_pts = Some(pts_ms);
                     }
+                    self.delivered = Some(publication);
                     return Ok(VideoCaptureEvent::Frame(VideoFrame {
                         stream_id: self.stream_id,
                         width,
@@ -440,16 +491,23 @@ impl capture_api::VideoCapture for WgcDisplayCapture {
                         payload: FramePayload::Gpu(handle),
                     }));
                 }
-                Ok(InternalEvent::FormatChanged { width, height }) => {
+                Ok(InternalEvent::FormatChanged {
+                    width,
+                    height,
+                    pool,
+                }) => {
+                    if let Some(shared) = &self.shared {
+                        let mut current =
+                            shared.pool.lock().map_err(|_| VideoCaptureError::Backend {
+                                details: "WGC resolver state poisoned".into(),
+                            })?;
+                        if let Some(old) = current.replace(pool) {
+                            old.clear();
+                        }
+                    }
                     return Ok(VideoCaptureEvent::FormatChanged { width, height });
                 }
-                Ok(InternalEvent::SourceClosed) => {
-                    return Ok(VideoCaptureEvent::SourceLost);
-                }
-                Ok(InternalEvent::Failed { details }) => {
-                    return Err(VideoCaptureError::Backend { details });
-                }
-                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Timeout) => return Ok(VideoCaptureEvent::Idle),
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(VideoCaptureError::EndOfStream);
                 }
@@ -462,6 +520,7 @@ impl capture_api::VideoCapture for WgcDisplayCapture {
             return Ok(()); // idempotent
         }
         self.stop_flag.store(true, Ordering::SeqCst);
+        self.delivered.take();
         if let Some(shared) = &self.shared {
             shared.queue_alive.store(false, Ordering::SeqCst);
         }
@@ -502,7 +561,7 @@ fn run_session(
     if let Err(err) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
         let details = format!("RoInitialize failed: {err}");
         diagnostics::error("wgc", &details);
-        let _ = event_tx.send(InternalEvent::Failed { details });
+        shared.fail(details);
         return;
     }
 
@@ -517,27 +576,15 @@ fn run_session(
             // Park until Stop arrives, keeping all objects alive here so
             // callbacks keep firing. Drop order releases platform resources
             // deterministically on this thread.
-            let SessionSetup {
-                pool,
-                session,
-                item,
-                frame_token,
-                closed_token,
-            } = setup;
             if let Ok(Control::Stop) = control_rx.recv() {
                 // fallthrough to cleanup via drop
             }
-            let _ = pool.RemoveFrameArrived(frame_token);
-            let _ = item.RemoveClosed(closed_token);
-            let _ = session.Close();
-            let _ = pool.Close();
+            drop(setup);
             diagnostics::info("wgc", "session thread closing");
         }
         Err(err) => {
             diagnostics::error("wgc", &format!("session failed: {err}"));
-            let _ = event_tx.send(InternalEvent::Failed {
-                details: err.to_string(),
-            });
+            shared.fail(err.to_string());
         }
     }
     unsafe {
@@ -549,13 +596,26 @@ struct SessionSetup {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     item: GraphicsCaptureItem,
-    frame_token: i64,
-    closed_token: i64,
+    frame_token: Option<i64>,
+    closed_token: Option<i64>,
+}
+impl Drop for SessionSetup {
+    fn drop(&mut self) {
+        if let Some(token) = self.frame_token.take() {
+            let _ = self.pool.RemoveFrameArrived(token);
+        }
+        if let Some(token) = self.closed_token.take() {
+            let _ = self.item.RemoveClosed(token);
+        }
+        let _ = self.session.Close();
+        let _ = self.pool.Close();
+    }
 }
 
 /// Map `windows::core::Result` errors into our backend error at `?` sites.
 trait IntoCapture<T> {
     fn cap(self) -> CaptureResult<T>;
+    fn cap_at(self, stage: &'static str) -> CaptureResult<T>;
 }
 
 impl<T> IntoCapture<T> for windows::core::Result<T> {
@@ -564,13 +624,18 @@ impl<T> IntoCapture<T> for windows::core::Result<T> {
             details: err.to_string(),
         })
     }
+    fn cap_at(self, stage: &'static str) -> CaptureResult<T> {
+        self.map_err(|err| VideoCaptureError::Backend {
+            details: format!("{stage} failed: {err}"),
+        })
+    }
 }
 
 fn allocate_staging_pool(
-    device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    shared: &SharedState,
     width: u32,
     height: u32,
-) -> CaptureResult<Vec<ID3D11Texture2D>> {
+) -> CaptureResult<Option<Arc<LeasePool<GpuTextureSlot>>>> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: width.max(1),
         Height: height.max(1),
@@ -586,25 +651,29 @@ fn allocate_staging_pool(
         CPUAccessFlags: 0,
         MiscFlags: 0,
     };
-    let mut pool = Vec::with_capacity(STAGING_RING_SIZE);
-    for _ in 0..STAGING_RING_SIZE {
+    let mut budget = shared
+        .budget
+        .lock()
+        .map_err(|_| VideoCaptureError::Backend {
+            details: "WGC surface budget poisoned".into(),
+        })?;
+    let pool = budget.allocate(STAGING_RING_SIZE, || {
         let mut texture: Option<ID3D11Texture2D> = None;
         unsafe {
-            device
+            shared
+                .device_context
+                .device()
                 .CreateTexture2D(&desc, None, Some(&mut texture))
                 .map_err(|err| VideoCaptureError::Backend {
                     details: format!("CreateTexture2D for staging pool failed: {err}"),
                 })?;
         }
-        if let Some(tex) = texture {
-            pool.push(tex);
-        } else {
-            return Err(VideoCaptureError::Backend {
-                details: "CreateTexture2D returned None".to_string(),
-            });
-        }
-    }
-    Ok(pool)
+        let texture = texture.ok_or_else(|| VideoCaptureError::Backend {
+            details: "CreateTexture2D returned None".to_string(),
+        })?;
+        Ok(GpuTextureSlot::new(texture, shared.device_context.clone()))
+    })?;
+    Ok(pool.map(|pool| Arc::new(LeasePool::from_shared(pool))))
 }
 
 fn run_session_inner(
@@ -631,22 +700,24 @@ fn run_session_inner(
         inspectable.cast().cap()?;
 
     let interop: IGraphicsCaptureItemInterop = factory::<GraphicsCaptureItem, _>().cap()?;
-    let item: GraphicsCaptureItem = if let Some(hwnd_str) = source_id.strip_prefix("hwnd:") {
-        let hwnd_val = hwnd_str.parse::<usize>().unwrap_or(0);
-        let hwnd = windows::Win32::Foundation::HWND(hwnd_val as *mut core::ffi::c_void);
-        unsafe { interop.CreateForWindow(hwnd) }.cap()?
+    let item: GraphicsCaptureItem = if source_id.starts_with("hwnd:")
+        || source_id.starts_with("pid:")
+    {
+        let hwnd = crate::enumerate::resolve_window(source_id)?;
+        crate::enumerate::check_window_capture_affinity(hwnd)?;
+        unsafe { interop.CreateForWindow(hwnd) }.cap_at("GraphicsCaptureItem.CreateForWindow")?
     } else {
         let (_output, hmonitor_isize) = resolve_source(source_id)?;
         let hmonitor = HMONITOR(hmonitor_isize as *mut core::ffi::c_void);
-        unsafe { interop.CreateForMonitor(hmonitor) }.cap()?
+        unsafe { interop.CreateForMonitor(hmonitor) }
+            .cap_at("GraphicsCaptureItem.CreateForMonitor")?
     };
 
-    let initial_size = item.Size().cap()?;
-    let initial_width = initial_size.Width.max(1) as u32;
-    let initial_height = initial_size.Height.max(1) as u32;
-    let initial_pool = allocate_staging_pool(&device, initial_width, initial_height)?;
-    let staging_pool = Arc::new(Mutex::new(initial_pool));
-    let ring_cursor = Arc::new(AtomicUsize::new(0));
+    let initial_size = item.Size().cap_at("GraphicsCaptureItem.Size")?;
+    // Item.Size can include bounds that differ from the first ContentSize.
+    // Allocate only for observed content, avoiding a disposable eight-surface
+    // startup pool that would consume a retained-session budget during restart.
+    let staging_pool = Arc::new(Mutex::new(None::<Arc<LeasePool<GpuTextureSlot>>>));
 
     let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &d3d_device,
@@ -654,26 +725,35 @@ fn run_session_inner(
         FRAME_POOL_BUFFERS,
         initial_size,
     )
-    .cap()?;
+    .cap_at("Direct3D11CaptureFramePool.CreateFreeThreaded")?;
+    let session = pool
+        .CreateCaptureSession(&item)
+        .cap_at("CreateCaptureSession")?;
+    // From here, any setup failure unregisters handlers and breaks pool/handler
+    // reference cycles rather than leaking a failed session's GPU allocation.
+    let mut setup = SessionSetup {
+        pool: pool.clone(),
+        session: session.clone(),
+        item: item.clone(),
+        frame_token: None,
+        closed_token: None,
+    };
 
     // Frame pump: drain whatever is available each wake-up, copying each
     // surface into a pre-allocated GPU texture from the staging ring under a unique handle.
     let handler_shared = Arc::clone(shared);
-    let handler_size = Arc::new(Mutex::new(initial_size));
+    let handler_size = Arc::new(Mutex::new(None::<windows::Graphics::SizeInt32>));
     // Pre-allocated texture pool is reused across frames (0 per-frame allocations).
-    let texture_creator = SendDevice(device.clone());
     let copy_context = SendContext(context.clone());
     // Owned handle: Recreate takes the WinRT device by reference.
     let handler_device = SendWinrtDevice(d3d_device.clone());
     let handler_pool = pool.clone();
     let handler_tx = event_tx.clone();
     let handler_staging_pool = Arc::clone(&staging_pool);
-    let handler_ring_cursor = Arc::clone(&ring_cursor);
     let frame_handler =
         TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(move |_sender, _| {
             // Use our owned handle rather than the callback's guard ref.
             let pool = handler_pool.clone();
-            let texture_creator = &texture_creator.0;
             let context = &copy_context.0;
             let winrt_device = handler_device.get();
             if !handler_shared.queue_alive.load(Ordering::SeqCst) {
@@ -687,6 +767,42 @@ fn run_session_inner(
                 let Ok(content) = frame.ContentSize() else {
                     continue;
                 };
+                if let Some(target) = &handler_shared.window_target {
+                    match crate::enumerate::resolve_window(target) {
+                        Ok(hwnd) => {
+                            if unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(hwnd) }
+                                .as_bool()
+                            {
+                                // Some windows publish a tiny taskbar-sized
+                                // surface while minimized. It is not a new game
+                                // format and may be unsupported by hardware MFTs.
+                                let _ = frame.Close();
+                                continue;
+                            }
+                            let mut client = windows::Win32::Foundation::RECT::default();
+                            if unsafe {
+                                windows::Win32::UI::WindowsAndMessaging::GetClientRect(
+                                    hwnd,
+                                    &mut client,
+                                )
+                            }
+                            .is_ok()
+                                && obsolete_window_content(content.Width, content.Height, &client)
+                            {
+                                // Minimized publications can arrive after restore.
+                                // Do not configure an obsolete taskbar thumbnail
+                                // when the live client is already larger.
+                                let _ = frame.Close();
+                                continue;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = frame.Close();
+                            handler_shared.queue_alive.store(false, Ordering::Release);
+                            return Ok(());
+                        }
+                    }
+                }
                 if content.Width <= 0 || content.Height <= 0 {
                     continue;
                 }
@@ -699,18 +815,28 @@ fn run_session_inner(
                         Ok(guard) => guard,
                         Err(_) => return Ok(()),
                     };
-                    if guard.Width != content.Width || guard.Height != content.Height {
-                        *guard = content;
+                    if guard.as_ref() != Some(&content) {
+                        let is_resize = guard.is_some();
                         let new_width = content.Width.max(1) as u32;
                         let new_height = content.Height.max(1) as u32;
-                        if let Ok(new_pool) =
-                            allocate_staging_pool(texture_creator, new_width, new_height)
-                        {
-                            if let Ok(mut pool_guard) = handler_staging_pool.lock() {
-                                *pool_guard = new_pool;
-                            }
-                            handler_shared.release_staged();
-                        }
+                        let new_pool =
+                            match allocate_staging_pool(&handler_shared, new_width, new_height) {
+                                Ok(Some(pool)) => pool,
+                                Ok(None) => {
+                                    // Rapid restore/resize can overtake consumer
+                                    // retirement. Keep the bounded budget and
+                                    // retry on a later frame, without publishing
+                                    // pixels under the wrong format or failing
+                                    // an otherwise healthy capture session.
+                                    let _ = frame.Close();
+                                    break;
+                                }
+                                Err(error) => {
+                                    handler_shared.fail(error.to_string());
+                                    return Ok(());
+                                }
+                            };
+                        let _ = frame.Close();
                         let resized = pool.Recreate(
                             &winrt_device,
                             DirectXPixelFormat::B8G8R8A8UIntNormalized,
@@ -718,16 +844,32 @@ fn run_session_inner(
                             content,
                         );
                         if let Ok(mut stats) = handler_shared.stats.lock() {
-                            stats.resizes += 1;
+                            stats.resizes += u64::from(is_resize);
                         }
-                        let _ = handler_tx.try_send(InternalEvent::FormatChanged {
-                            width: content.Width.max(0) as u32,
-                            height: content.Height.max(0) as u32,
-                        });
+                        if let Err(error) = resized {
+                            handler_shared.fail(format!("WGC frame pool resize failed: {error}"));
+                            return Ok(());
+                        }
+                        *guard = Some(content);
+                        if handler_tx
+                            .try_send(InternalEvent::FormatChanged {
+                                width: content.Width.max(0) as u32,
+                                height: content.Height.max(0) as u32,
+                                pool: new_pool.clone(),
+                            })
+                            .is_err()
+                        {
+                            handler_shared
+                                .fail("WGC format transition queue full/disconnected".into());
+                            return Ok(());
+                        }
+                        if let Ok(mut pool_guard) = handler_staging_pool.lock() {
+                            *pool_guard = Some(new_pool);
+                        } else {
+                            handler_shared.fail("WGC staging pool poisoned".into());
+                            return Ok(());
+                        }
                         drop(guard);
-                        if resized.is_err() {
-                            break;
-                        }
                         break;
                     }
                 }
@@ -744,24 +886,38 @@ fn run_session_inner(
                 };
 
                 // Copy into next pre-allocated texture from the staging ring (zero per-frame allocations).
-                let staged_texture = {
+                let staging = {
                     let pool_guard = match handler_staging_pool.lock() {
                         Ok(guard) => guard,
                         Err(_) => continue,
                     };
-                    if pool_guard.is_empty() {
+                    let Some(pool) = pool_guard.as_ref() else {
                         continue;
+                    };
+                    pool.clone()
+                };
+                let Some((index, publication)) = staging.acquire() else {
+                    if let Ok(mut stats) = handler_shared.stats.lock() {
+                        stats.frames_dropped_pool_full += 1;
                     }
-                    let index =
-                        handler_ring_cursor.fetch_add(1, Ordering::Relaxed) % pool_guard.len();
-                    pool_guard[index].clone()
+                    continue;
                 };
 
                 unsafe {
-                    context.CopyResource(&staged_texture, &texture);
+                    context.CopyResource(publication.texture(), &texture);
                 }
 
-                let handle = handler_shared.insert_staged(staged_texture);
+                let handle =
+                    match NEXT_HANDLE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                        value.checked_add(1)
+                    }) {
+                        Ok(value) => GpuFrameHandle(value),
+                        Err(_) => {
+                            handler_shared.fail("WGC frame handle exhausted".into());
+                            return Ok(());
+                        }
+                    };
+                staging.publish(index, handle.0);
                 if let Ok(mut stats) = handler_shared.stats.lock() {
                     stats.frames_copied += 1;
                 }
@@ -777,6 +933,7 @@ fn run_session_inner(
                         width: content.Width.max(0) as u32,
                         height: content.Height.max(0) as u32,
                         source_ticks: source_ticks.Duration,
+                        publication,
                     },
                 );
 
@@ -784,19 +941,17 @@ fn run_session_inner(
             }
             Ok(())
         });
-    let frame_token = pool.FrameArrived(&frame_handler).cap()?;
+    setup.frame_token = Some(pool.FrameArrived(&frame_handler).cap()?);
 
     // Monitor disappearance surfaces once as SourceLost (VID-007); the
     // engine decides recovery vs clean stop.
-    let closed_tx = event_tx.clone();
+    let closed_shared = shared.clone();
     let closed_handler =
         TypedEventHandler::<GraphicsCaptureItem, IInspectable>::new(move |_, _| {
-            let _ = closed_tx.try_send(InternalEvent::SourceClosed);
+            closed_shared.queue_alive.store(false, Ordering::Release);
             Ok(())
         });
-    let closed_token = item.Closed(&closed_handler).cap()?;
-
-    let session = pool.CreateCaptureSession(&item).cap()?;
+    setup.closed_token = Some(item.Closed(&closed_handler).cap()?);
     session.SetIsCursorCaptureEnabled(cursor_capture).cap()?;
     // Windows requires consent before it will honor IsBorderRequired=false.
     // Negotiate before StartCapture, never on the real-time frame callback.
@@ -817,7 +972,12 @@ fn run_session_inner(
             &format!("borderless capture permission unavailable: {error}; retaining Windows capture indicator"),
         ),
     }
-    session.StartCapture().cap()?;
+    // Window bounds used during enumeration can include non-content borders.
+    shared.validate_capture()?;
+    // First observed ContentSize publishes the format before any staged frame.
+    session
+        .StartCapture()
+        .cap_at("GraphicsCaptureSession.StartCapture")?;
     diagnostics::info(
         "wgc",
         &format!(
@@ -826,11 +986,50 @@ fn run_session_inner(
         ),
     );
 
-    Ok(SessionSetup {
-        pool,
-        session,
-        item,
-        frame_token,
-        closed_token,
-    })
+    Ok(setup)
+}
+
+// WGC includes non-client bounds, so it cannot be smaller than the current
+// client. Empty clients occur during minimize transitions before IsIconic has
+// necessarily caught up. Do not turn either transient into an encoder epoch.
+fn obsolete_window_content(
+    width: i32,
+    height: i32,
+    client: &windows::Win32::Foundation::RECT,
+) -> bool {
+    client.right <= client.left
+        || client.bottom <= client.top
+        || i64::from(width) < i64::from(client.right) - i64::from(client.left)
+        || i64::from(height) < i64::from(client.bottom) - i64::from(client.top)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn minimize_and_stale_restore_content_never_become_window_formats() {
+        use windows::Win32::Foundation::RECT;
+        let restored = RECT {
+            left: 0,
+            top: 0,
+            right: 784,
+            bottom: 561,
+        };
+        assert!(super::obsolete_window_content(146, 21, &RECT::default()));
+        assert!(super::obsolete_window_content(146, 21, &restored));
+        assert!(!super::obsolete_window_content(786, 593, &restored));
+        assert!(!super::obsolete_window_content(784, 561, &restored));
+    }
+    use super::*;
+    #[test]
+    fn setup_error_keeps_stage_and_hresult() {
+        let result: windows::core::Result<()> = Err(windows::core::Error::from_hresult(
+            windows::Win32::Foundation::E_INVALIDARG,
+        ));
+        let error = result
+            .cap_at("GraphicsCaptureItem.CreateForWindow")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("GraphicsCaptureItem.CreateForWindow"));
+        assert!(error.contains("0x80070057"));
+    }
 }

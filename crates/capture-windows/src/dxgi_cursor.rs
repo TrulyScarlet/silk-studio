@@ -62,13 +62,25 @@ impl Cursor {
         width: u32,
         height: u32,
     ) -> Result<()> {
+        self.draw_with_offset(gpu, target, width, height, 0, 0)
+    }
+
+    pub fn draw_with_offset(
+        &mut self,
+        gpu: &GpuDeviceContext,
+        target: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+        origin_x: i32,
+        origin_y: i32,
+    ) -> Result<()> {
         if !self.position.Visible.as_bool() || self.bytes.is_empty() {
             return Ok(());
         }
         let cursor_height = shape_height(&self.shape);
         let Some((left, top, right, bottom, offset_x, offset_y)) = clipped_rect(
-            self.position.Position.x,
-            self.position.Position.y,
+            self.position.Position.x - origin_x,
+            self.position.Position.y - origin_y,
             self.shape.Width,
             cursor_height,
             width,

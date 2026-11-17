@@ -48,20 +48,27 @@ if ($null -ne $metadata) {
 }
 
 if (Test-Path -LiteralPath $packageLock -PathType Leaf) {
-    $lock = Get-Content -LiteralPath $packageLock -Raw | ConvertFrom-Json -AsHashtable
-    $rootPackage = $lock.packages['']
-    $packageManifest = Get-Content -LiteralPath (Join-Path $root "apps\desktop\package.json") -Raw | ConvertFrom-Json
-    $declared = @(
-        $packageManifest.dependencies.PSObject.Properties | ForEach-Object { $_.Name }
-        $packageManifest.devDependencies.PSObject.Properties | ForEach-Object { $_.Name }
-    ) | Sort-Object -Unique
-    foreach ($name in $declared) {
-        $lockKey = "node_modules/$name"
-        if (-not $lock.packages.ContainsKey($lockKey)) {
-            Add-Failure "Frontend dependency '$name' is not represented in package-lock.json."
-        }
+    $script = @"
+const fs = require('fs');
+const lock = JSON.parse(fs.readFileSync('$($packageLock.Replace('\', '/'))', 'utf8'));
+const manifest = JSON.parse(fs.readFileSync('$((Join-Path $root "apps/desktop/package.json").Replace('\', '/'))', 'utf8'));
+const declared = new Set([...Object.keys(manifest.dependencies || {}), ...Object.keys(manifest.devDependencies || {})]);
+let missing = [];
+for (const name of declared) {
+    if (!lock.packages['node_modules/' + name]) missing.push(name);
+}
+if (missing.length > 0) {
+    console.error('MISSING:' + missing.join(', '));
+    process.exit(1);
+}
+console.log(declared.size);
+"@
+    $nodeRes = & node -e $script 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Add-Failure "Frontend dependencies missing in lockfile: $nodeRes"
+    } else {
+        Write-Output "Frontend direct dependencies checked: $nodeRes"
     }
-    Write-Output "Frontend direct dependencies checked: $($declared.Count)"
 }
 
 if (Test-Path -LiteralPath $inventoryPath -PathType Leaf) {

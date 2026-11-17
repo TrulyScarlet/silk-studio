@@ -11,7 +11,55 @@ const MAX_VIDEO_BITRATE_KBPS: u32 = 100_000;
 /// Validate every setting; returns all violations (empty when valid).
 pub fn validate_settings(config: &AppConfig) -> Vec<FieldIssue> {
     let mut issues = Vec::new();
-    let colors = &config.application.colors;
+    validate_theme_colors(
+        &config.application.colors,
+        "application.colors",
+        &mut issues,
+    );
+    if config.application.theme_presets.len() > 20 {
+        issues.push(FieldIssue {
+            field: "application.themePresets".into(),
+            reason: "at most 20 custom presets are allowed".into(),
+        });
+    }
+    let mut names = BTreeSet::new();
+    for (index, preset) in config.application.theme_presets.iter().enumerate() {
+        if preset.name.trim() != preset.name
+            || preset.name.is_empty()
+            || preset.name.chars().count() > 40
+            || preset.name.chars().any(char::is_control)
+            || !names.insert(preset.name.to_lowercase())
+        {
+            issues.push(FieldIssue { field: format!("application.themePresets.{index}.name"), reason: "use a unique name of 1–40 characters, without surrounding spaces or control characters".into() });
+        }
+        validate_theme_colors(
+            &preset.colors,
+            &format!("application.themePresets.{index}.colors"),
+            &mut issues,
+        );
+    }
+    if config
+        .application
+        .active_theme_preset
+        .as_ref()
+        .is_some_and(|name| {
+            !config
+                .application
+                .theme_presets
+                .iter()
+                .any(|preset| &preset.name == name)
+        })
+    {
+        issues.push(FieldIssue {
+            field: "application.activeThemePreset".into(),
+            reason: "must reference a saved custom preset".into(),
+        });
+    }
+
+    validate_remaining_settings(config, issues)
+}
+
+fn validate_theme_colors(colors: &crate::ThemeColors, prefix: &str, issues: &mut Vec<FieldIssue>) {
     for (key, value) in [
         ("main", &colors.main),
         ("background", &colors.background),
@@ -19,6 +67,11 @@ pub fn validate_settings(config: &AppConfig) -> Vec<FieldIssue> {
         ("subtext", &colors.subtext),
         ("capture", &colors.capture),
         ("replayBuffer", &colors.replay_buffer),
+        ("clipSaved", &colors.clip_saved),
+        ("clipSavedBackground", &colors.clip_saved_background),
+        ("overlayAccent", &colors.overlay_accent),
+        ("overlayBackground", &colors.overlay_background),
+        ("overlayText", &colors.overlay_text),
     ] {
         if let Some(value) = value {
             if value.len() != 7
@@ -26,13 +79,15 @@ pub fn validate_settings(config: &AppConfig) -> Vec<FieldIssue> {
                 || !value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
             {
                 issues.push(FieldIssue {
-                    field: format!("application.colors.{key}"),
+                    field: format!("{prefix}.{key}"),
                     reason: "must be a six-digit hex color (#RRGGBB)".into(),
                 });
             }
         }
     }
+}
 
+fn validate_remaining_settings(config: &AppConfig, mut issues: Vec<FieldIssue>) -> Vec<FieldIssue> {
     if config.application.clip_sound_volume > 300 {
         issues.push(FieldIssue {
             field: "application.clipSoundVolume".into(),
@@ -54,7 +109,10 @@ pub fn validate_settings(config: &AppConfig) -> Vec<FieldIssue> {
         });
     } else {
         let source_type = config.capture.source_type.to_ascii_lowercase();
-        if !matches!(source_type.as_str(), "display" | "game" | "window") {
+        if !matches!(
+            source_type.as_str(),
+            "display" | "game" | "window" | "game-guarded" | "game-auto"
+        ) {
             issues.push(FieldIssue {
                 field: "capture.sourceType".to_string(),
                 reason: format!(
@@ -62,7 +120,10 @@ pub fn validate_settings(config: &AppConfig) -> Vec<FieldIssue> {
                     config.capture.source_type
                 ),
             });
-        } else if source_type != "game" && config.capture.source_id.trim().is_empty() {
+        } else if source_type != "game"
+            && source_type != "game-auto"
+            && config.capture.source_id.trim().is_empty()
+        {
             issues.push(FieldIssue {
                 field: "capture.sourceId".to_string(),
                 reason: "must not be empty".to_string(),
@@ -402,6 +463,90 @@ fn validate_file_name_pattern(pattern: &str, field: &str, issues: &mut Vec<Field
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn named_theme_presets_roundtrip_colors_and_independent_icons() {
+        let mut config = crate::AppConfig::default();
+        config.application.theme_presets.push(crate::ThemePreset {
+            name: "Ocean".into(),
+            theme: crate::Theme::Studio,
+            icon_theme: crate::Theme::Vamp,
+            colors: crate::ThemeColors {
+                capture: Some("#123456".into()),
+                clip_saved: Some("#abcdef".into()),
+                clip_saved_background: Some("#111111".into()),
+                overlay_accent: Some("#654321".into()),
+                overlay_background: Some("#222222".into()),
+                overlay_text: Some("#eeeeee".into()),
+                ..Default::default()
+            },
+        });
+        config.application.active_theme_preset = Some("Ocean".into());
+        config.application.icon_theme = Some(crate::Theme::Vamp);
+        assert!(super::validate_settings(&config).is_empty());
+        let restored: crate::AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored, config);
+        let directory = std::env::temp_dir().join("opencode").join(format!(
+            "silk-theme-roundtrip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.json");
+        crate::save(&path, &config).unwrap();
+        assert_eq!(crate::load(&path).unwrap().settings, config);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn theme_presets_validate_names_bounds_references_and_all_colors() {
+        let mut config = crate::AppConfig::default();
+        let preset = crate::ThemePreset {
+            name: "Ocean".into(),
+            theme: crate::Theme::Studio,
+            icon_theme: crate::Theme::Ember,
+            colors: Default::default(),
+        };
+        config.application.theme_presets = vec![
+            preset.clone(),
+            crate::ThemePreset {
+                name: "ocean".into(),
+                ..preset.clone()
+            },
+        ];
+        assert!(super::validate_settings(&config)
+            .iter()
+            .any(|issue| issue.field.ends_with(".name")));
+        for name in ["", " spaced ", "bad\nname", &"a".repeat(41)] {
+            config.application.theme_presets = vec![crate::ThemePreset {
+                name: name.into(),
+                ..preset.clone()
+            }];
+            assert!(super::validate_settings(&config)
+                .iter()
+                .any(|issue| issue.field.ends_with(".name")));
+        }
+        config.application.theme_presets = vec![preset.clone(); 21];
+        assert!(super::validate_settings(&config)
+            .iter()
+            .any(|issue| issue.field == "application.themePresets"));
+        config.application.theme_presets = vec![preset];
+        config.application.theme_presets[0].colors.overlay_text = Some("invalid".into());
+        config.application.colors.clip_saved = Some("#xyzxyz".into());
+        config.application.active_theme_preset = Some("Missing".into());
+        let issues = super::validate_settings(&config);
+        for field in [
+            "application.themePresets.0.colors.overlayText",
+            "application.colors.clipSaved",
+            "application.activeThemePreset",
+        ] {
+            assert!(issues.iter().any(|issue| issue.field == field), "{field}");
+        }
+    }
     use super::*;
     use crate::model::{AppConfig, DEFAULT_FILE_NAME_PATTERN};
 
@@ -640,6 +785,13 @@ mod tests {
         c.capture.source_id = "auto".to_string();
         assert!(validate_settings(&c).is_empty());
         c.capture.source_type = "GAME".to_string();
+        assert!(validate_settings(&c).is_empty());
+        c.capture.source_type = "game-guarded".to_string();
+        c.capture.source_id.clear();
+        assert!(validate_settings(&c)
+            .iter()
+            .any(|i| i.field == "capture.sourceId"));
+        c.capture.source_id = "pid:42:created:34:hwnd:56".to_string();
         assert!(validate_settings(&c).is_empty());
     }
 

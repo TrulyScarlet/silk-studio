@@ -30,6 +30,11 @@ Rules of engagement:
 
 ## 2. Segment map
 
+Scope amendment (2026-11-11): [ADR 0044](decisions/0044-experimental-hook-game-capture.md)
+adds a separately gated, opt-in experimental game-capture milestone. This does
+not mark existing capture segments complete or authorize a production release
+of unvalidated hooks.
+
 | Segment | Name | Spec milestone | Primary crates / areas | Key requirements | Status |
 |---|---|---|---|---|---|
 | S0 | Foundations and repository scaffold | M0 | workspace, `media-types`, `configuration`, `diagnostics`, mocks | APP-001/002/005/007 | **Exited 2026-08-26** ([evidence](progress/segment-S0.md)) |

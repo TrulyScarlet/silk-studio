@@ -72,7 +72,7 @@ const EMPTY_STATUS: RecorderStatus = {
 
 const PREVIEW_MOCK_SETTINGS: AppSettings = {
   capture: {
-    sourceType: "game",
+    sourceType: "game-auto",
     sourceId: "primary",
     frameRate: 60,
     outputResolution: "native",
@@ -415,9 +415,15 @@ function formatCaptureSource(
   windows: WindowSourceInfo[],
   includePrefix = true,
 ): string {
-  if (sourceType === "game") {
-    return "Game Capture (Auto)";
+  if (sourceType === "game" || sourceType === "game-guarded") {
+    const win = windows.find((w) => w.id === sourceId);
+    if (win) {
+      const name = `${win.appName ? `${win.appName} - ` : ""}${win.title}`;
+      return includePrefix ? `Game: ${name}` : name;
+    }
+    return includePrefix ? "Game: None selected" : "None selected";
   }
+  if (sourceType === "game-auto") return includePrefix ? "Game: Auto-detect" : "Auto-detect";
   if (sourceType === "window") {
     const win = windows.find((w) => w.id === sourceId);
     if (win) {
@@ -497,11 +503,12 @@ export default function App() {
   }
 
   const activeTheme: AppTheme = settings?.application?.theme ?? "studio";
+  const activeIconTheme = settings?.application.iconTheme ?? activeTheme;
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", activeTheme);
-    void updateThemeIcon(activeTheme).catch(() => {});
-  }, [activeTheme]);
+    void updateThemeIcon(activeIconTheme).catch(() => {});
+  }, [activeTheme, activeIconTheme]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -626,6 +633,9 @@ export default function App() {
               theme: normalizeTheme(loaded.application?.theme),
               openClipsFullscreen: loaded.application?.openClipsFullscreen ?? false,
               colors: loaded.application?.colors ?? {},
+              iconTheme: loaded.application?.iconTheme ?? null,
+              themePresets: loaded.application?.themePresets ?? [],
+              activeThemePreset: loaded.application?.activeThemePreset ?? null,
             },
             encoding: {
               ...loaded.encoding,
@@ -1006,7 +1016,7 @@ export default function App() {
       setSettings(next);
       setDraft(next);
       setSettingsMessage(
-        "Settings saved. Replay duration and hotkeys are live; capture and encoder changes apply on the next start.",
+        "Settings saved. Source changes restart capture and reset unsaved replay history; other encoder changes apply on the next start.",
       );
       await refreshLibrary();
     } catch (error: unknown) {
@@ -1184,6 +1194,9 @@ export default function App() {
     : "H.264";
   const isHardwareEncoder = settings?.encoding.encoder !== "software";
   const encoderDisplay = `${activeCodecLabel} (${isHardwareEncoder ? "HW" : "SW"})`;
+  const isGameAuto = settings?.capture.sourceType === "game-auto";
+  const isGameMode = settings?.capture.sourceType.startsWith("game");
+  const isWindowMode = settings?.capture.sourceType === "window";
   const targetDisplayLabel = settings
     ? formatCaptureSource(
         settings.capture.sourceType,
@@ -1192,7 +1205,19 @@ export default function App() {
         windows,
         false,
       )
-    : "Automatic Game Capture";
+    : "Auto-detect";
+  const defaultTargetLabel = isGameAuto
+    ? "Game: Auto-detect (No game detected)"
+    : isGameMode
+      ? `Game: ${targetDisplayLabel}`
+      : isWindowMode
+        ? `Window: ${targetDisplayLabel}`
+        : `${targetDisplayLabel} · Desktop`;
+  const targetTooltip = isGameMode
+    ? "Captures your game with freeze continuity when switching windows."
+    : isWindowMode
+      ? "Captures the selected window."
+      : "The entire selected display is captured.";
 
   return (
     <>
@@ -1224,7 +1249,7 @@ export default function App() {
               <div className="hero-meta-summary">
                 <span className="meta-stat">
                   <small>Target</small>
-                  <strong title="The entire selected display is captured. This identifies the visible app, not an isolated game capture.">{captureActive ? (status.captureTarget ?? `${targetDisplayLabel} · Desktop`) : targetDisplayLabel}</strong>
+                  <strong title={targetTooltip}>{captureActive ? (status.captureTarget ?? defaultTargetLabel) : targetDisplayLabel}</strong>
                 </span>
                 <span className="meta-stat">
                   <small>FPS</small>

@@ -1,5 +1,69 @@
 # Third-Party License Inventory
 
+Owned WGC endurance diagnostics additionally use windows 0.62.2's
+Win32_System_ProcessStatus bindings for process memory counters and existing
+Threading bindings for handle counts. Same MIT OR Apache-2.0 package/version;
+test/fixture scope only, no new dependency, service, driver or production backend.
+
+ADR 0079 adds no package/version: windows 0.62.2 (MIT OR Apache-2.0) provides
+additional user-mode exception-context/symbol diagnostics for the exact owned
+fixture via Win32_System_Kernel/Diagnostics_Debug bindings. This is not a kernel
+driver, a new injection mechanism or a normal-desktop dependency. Existing local
+retirement/transport code supplies the controlled hardware loss probe.
+
+ADR 0076's conditional owned late ResizeBuffers1 observer reuses `windows` 0.62.2
+(MIT OR Apache-2.0), development `minhook` 0.9.0 and internal crates. Only feature
+flags and original local code were added; no new external package/version/license
+or normal desktop hook dependency introduced.
+
+ADRs 0072–0075 reuse existing `windows` 0.62.2 (MIT OR Apache-2.0), `minhook`
+0.9.0 (MIT wrapper; bundled native license already recorded below), and internal
+crates for owned legacy factory observation, forwarding warmup and early D3D12
+helper loading. These remain default-off development features, not normal desktop
+dependencies. No new external package, version or license introduced.
+
+ADR 0071's owned quiescent RemoveDevice probes reuse existing `windows` 0.62.2
+(MIT OR Apache-2.0). No new external dependency/version/license or shipping route.
+
+ADRs 0069–0070 reuse existing `windows` 0.62.2 (MIT OR Apache-2.0) for process
+lifetime, WGC, D3D11 video processing and Media Foundation APIs. The prototype's
+new capture-windows dependency is internal and test-only. No external package,
+version, license or production hook dependency added.
+
+ADR 0068's default-off owned D3D12 healthy teardown/recreation reuses `windows`
+0.62.2 (MIT OR Apache-2.0), optional `minhook` 0.9.0 (existing MIT wrapper and
+BSD-2-Clause bundled notices), and internal capture/encoder interfaces. No new
+package, version, license or production dependency.
+
+ADR 0067's default-off D3D12 lifetime-precondition tests reuse `windows` 0.62.2
+(MIT OR Apache-2.0) for device/queue/adapter APIs. No package, version, license or
+production dependency changed.
+
+ADR 0066's default-off owned live-resize epochs reuse `windows` 0.62.2
+(MIT OR Apache-2.0), existing optional `minhook` 0.9.0 (MIT wrapper and existing
+BSD-2-Clause bundled notices), and internal capture/encoder interfaces. No new
+package/version/license or production dependency; purpose is bounded GPU epoch
+replacement and explicit owned ResizeBuffers control.
+
+ADR 0065's default-off independent in-process D3D12 worker reuses `windows`
+0.62.2 (MIT OR Apache-2.0), optional `minhook` 0.9.0 (MIT wrapper plus existing
+BSD-2-Clause MinHook/HDE notices), and existing internal GPU/capture interfaces.
+No new package/version/license or production dependency is introduced.
+
+ADR 0064 reuses optional `minhook` 0.9.0 (MIT wrapper, bundled MinHook/HDE
+BSD-2-Clause) and `windows` 0.62.2 (MIT OR Apache-2.0) for the default-off exact
+owned-child CreateSwapChainForHwnd detour. No new package/license or production
+dependency; existing MinHook notices and static-link inventory apply.
+
+ADR 0063 reuses `windows` 0.62.2 (MIT OR Apache-2.0) for canonical COM identities,
+DIRECT-queue/device checks and owned DXGI factory creation. No additional package,
+version, license or distribution artifact; this remains a default-off fixture.
+
+ADRs 0057–0061 reuse `windows` 0.62.2 (MIT OR Apache-2.0) for owned D3D12
+shared-fence transport/window queries and optional `minhook` 0.9.0 (existing
+BSD-2-Clause bundled components) for default-off owned Present detouring.
+No new package/license; fixture routing remains separate from production.
+
 Every dependency must record name, version, source URL, license, linking mode,
 distributed artifacts, required notices, and approval status (spec §26). This
 inventory is maintained from Segment S0 onward. Direct dependency versions below
@@ -38,6 +102,50 @@ are the current lockfile resolutions; the full transitive closure is checked by
 The desktop shell also directly uses the existing `windows` 0.62.2 bindings for
 Windows Shell taskbar relaunch properties and COPY-only file drag through OLE; capture uses the WinRT borderless
 consent APIs. No additional dependency package or license is introduced.
+
+## Experimental hook prototype (not shipped)
+
+- `minhook` **0.9.0**, [versioned crate](https://crates.io/crates/minhook/0.9.0),
+  [wrapper source revision](https://github.com/Jakobzs/minhook/tree/1009f6863fe14d4a2923f1fd30173a25ddb7c1c7):
+  MIT wrapper, statically linked only into the opt-in development fixture and
+  cooperative `silk_capture_hook_helper.dll` (ADR 0051).
+- Its bundled MinHook source declares **1.3.3** in `minhook/CMakeLists.txt`;
+  MinHook and the embedded Hacker Disassembler Engine carry BSD-2-Clause texts.
+  The source snapshot is pinned by the minhook 0.9.0 Cargo.lock checksum; do not
+  substitute an unrecorded system DLL. Upstream: https://github.com/TsudaKageyu/minhook.
+- Purpose: detour the controlled fixture's D3D11 Present function, including the
+  default-off resident helper route in ADR 0053. Normal OS remote DLL loading is
+  restricted to an exact child launched in passive fixture mode; no arbitrary-game
+  attachment, OBS code, or anti-cheat bypass is included.
+- Cooperative cross-process texture sharing uses the existing `windows` 0.62.2
+  bindings to official D3D11/DXGI/Win32 APIs; no additional third-party package.
+- Recorder fixture tests reuse existing workspace encoder/capture/media/muxer
+  crates and the attributed MP4 fork. Optional decoding reuses only the exact
+  approved external FFmpeg artifact below; nothing new is linked or downloaded.
+- `cc` build tooling, `tracing` and their dependencies already exist in the lockfile;
+  the only new third-party package resolution is `minhook` 0.9.0.
+- License review: permissive MIT/BSD terms; full notices retained in
+  `licenses/experimental-minhook.txt`. Include that file with any redistribution
+  of the experimental fixture or helper DLL. Production distribution is **not enabled**.
+- The default-off `capture-hook-helper` crate reuses the same pinned MinHook,
+  `windows` 0.62.2 bindings and original workspace GPU/transport code. Cooperative
+  loading uses system LoadLibraryExW; no additional third-party resolution or
+  injector dependency is introduced. Neither helper nor fixture is linked into Silk.
+- ADR 0053 additionally uses existing `windows` 0.62.2 Toolhelp, process-thread,
+  and data-memory bindings for owned-child loading and a resident worker. Both
+  the helper module and original Present code module are pinned for process life.
+  No new external package or executable-payload/remote-mapping library is added.
+- ADR 0054 uses the existing `windows` 0.62.2 (MIT OR Apache-2.0) D3D12 bindings
+  for the default-off owned offscreen renderer, command queue, resource barriers,
+  fence and readback buffers. The standalone `d3d12-fixture` feature does not enable
+  MinHook or injection; no additional dependency/package was introduced.
+- ADR 0055 extends the same bindings to two owned HWND flip-discard swap chains,
+  their known DIRECT queue and per-backbuffer render fences. It adds no package,
+  external capture implementation, hook or game-target loader.
+- ADR 0056 uses the same `windows` 0.62.2 (MIT OR Apache-2.0) D3D12 shared-resource
+  and D3D11 device5/context4 shared-fence bindings for owned same-adapter GPU
+  interop. `d3d12-gpu-fixture` does not enable MinHook/injection. No new package,
+  external implementation or production dependency was added.
 
 ## Updater dependencies
 

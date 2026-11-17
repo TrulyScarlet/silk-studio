@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { UpdateSettings } from "./AppUpdates";
 import { SHORTCUTS, eventChord, resolveShortcuts, shortcutConflicts } from "./shortcuts";
-import { COLOR_FIELDS, colorVariables, defaultColors } from "./themeColors";
+import { COLOR_FIELDS, colorVariables, resolvedColors } from "./themeColors";
 import { Icon } from "./Icon";
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
@@ -600,7 +600,15 @@ export function SettingsModal({
   const [activeTab, setActiveTab] = useState<SettingsTabId>("capture");
   const [chimeBusy, setChimeBusy] = useState(false);
   const [chimeMessage, setChimeMessage] = useState("");
+  const [presetName, setPresetName] = useState("");
+  const [presetMessage, setPresetMessage] = useState("");
   const modalRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (isOpen) {
+      setPresetName(settings?.application.activeThemePreset ?? "");
+      setPresetMessage("");
+    }
+  }, [isOpen, settings?.application.activeThemePreset]);
 
   // Close on Escape key
   useEffect(() => {
@@ -620,6 +628,10 @@ export function SettingsModal({
   }
 
   const conflicts = shortcutConflicts(draft.hotkeys);
+  const themeColors = resolvedColors(draft.application.theme, draft.application.colors);
+  const selectedBaseTheme = draft.application.activeThemePreset ? null : draft.application.theme;
+  const presets = draft.application.themePresets ?? [];
+  const matchingPreset = presets.find((preset) => preset.name.toLowerCase() === presetName.trim().toLowerCase());
   const bindings = resolveShortcuts(draft.hotkeys.shortcuts, draft.hotkeys);
   const isSettingsDirty = settings ? JSON.stringify(draft) !== JSON.stringify(settings) : false;
   const overlayNeedsSave = !settings || JSON.stringify(draft.overlay) !== JSON.stringify(settings.overlay);
@@ -877,22 +889,22 @@ export function SettingsModal({
               {activeTab === "capture" && (
                 <div className="settings-pane-section">
                   <div className="pane-section-header">
-                    <h3>Capture Target & Resolution</h3>
+                    <h3>Capture</h3>
                     <p>Select what Silk records and choose your target capture frame rate.</p>
                   </div>
 
                   <div className="settings-group-card">
                     <label className="field">
-                      <span>Capture source mode</span>
+                      <span>Record</span>
                       <select
-                        value={draft.capture.sourceType}
+                        id="capture-mode"
+                        aria-describedby={draft.capture.sourceType === "display" ? undefined : "capture-visibility-notice"}
+                        value={draft.capture.sourceType.startsWith("game") ? "game" : draft.capture.sourceType}
                         onChange={(event) => {
-                          const newType = event.target.value;
+                          const newType = event.target.value === "game" ? "game-auto" : event.target.value;
                           updateDraft((current) => {
                             let newSourceId = current.capture.sourceId;
-                            if (newType === "game") {
-                              newSourceId = "auto";
-                            } else if (newType === "display") {
+                            if (newType === "display") {
                               if (
                                 newSourceId === "auto" ||
                                 !displays.some((d) => d.id === newSourceId)
@@ -922,28 +934,58 @@ export function SettingsModal({
                         }}
                         disabled={settingsBusy}
                       >
-                        <option value="display">Display Capture (Monitor)</option>
-                        <option value="game">Game Capture (Fullscreen / Borderless)</option>
-                        <option value="window">Window Capture (Specific Application)</option>
+                        <option value="game">Game</option>
+                        <option value="display">Screen</option>
+                        <option value="window">Window</option>
                       </select>
                     </label>
 
+                    {draft.capture.sourceType.startsWith("game") && (
+                      <>
+                        <label className="field">
+                          <span>Game selection</span>
+                          <select
+                            id="capture-game-selection"
+                            aria-describedby="capture-game-behavior"
+                            value={draft.capture.sourceType === "game-auto" ? "automatic" : "manual"}
+                            onChange={(event) => {
+                              const automatic = event.currentTarget.value === "automatic";
+                              updateDraft((current) => ({
+                                ...current,
+                                capture: {
+                                  ...current.capture,
+                                  sourceType: automatic ? "game-auto" : "game",
+                                  sourceId: automatic || windows.some((w) => w.id === current.capture.sourceId)
+                                    ? current.capture.sourceId
+                                    : windows[0]?.id ?? "",
+                                },
+                              }));
+                            }}
+                            disabled={settingsBusy}
+                          >
+                            <option value="automatic">Automatic (Recommended)</option>
+                            <option value="manual">Choose a game</option>
+                          </select>
+                        </label>
+                      </>
+                    )}
                     {draft.capture.sourceType === "display" && (
                       <div className="field target-field">
                         <div className="field-label-group">
-                          <label htmlFor="capture-target-display">Target monitor</label>
-                          <small>Detected monitor to record</small>
+                          <label htmlFor="capture-target-display">Screen</label>
+                          <small>Records everything visible on this screen.</small>
                         </div>
                         <div className="target-control">
                           <select
                             id="capture-target-display"
                             value={draft.capture.sourceId}
-                            onChange={(event) =>
+                            onChange={(event) => {
+                              const sourceId = event.currentTarget.value;
                               updateDraft((current) => ({
                                 ...current,
-                                capture: { ...current.capture, sourceId: event.target.value },
-                              }))
-                            }
+                                capture: { ...current.capture, sourceId },
+                              }));
+                            }}
                             disabled={settingsBusy || displaySourcesBusy}
                           >
                             {displays.length === 0 ? (
@@ -975,45 +1017,27 @@ export function SettingsModal({
                       </div>
                     )}
 
-                    {draft.capture.sourceType === "game" && (
+                    {(draft.capture.sourceType === "window" || draft.capture.sourceType === "game" || draft.capture.sourceType === "game-guarded") && (
                       <div className="field target-field">
                         <div className="field-label-group">
-                          <label htmlFor="capture-target-game">Target application</label>
-                          <small>Foreground game capture</small>
-                        </div>
-                        <div className="target-control">
-                          <input
-                            id="capture-target-game"
-                            type="text"
-                            value="Automatic (Foreground / Fullscreen Game)"
-                            disabled
-                            readOnly
-                            className="readonly-target-input"
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {draft.capture.sourceType === "window" && (
-                      <div className="field target-field">
-                        <div className="field-label-group">
-                          <label htmlFor="capture-target-window">Target application</label>
-                          <small>Select active application window</small>
+                          <label htmlFor="capture-target-window">{draft.capture.sourceType === "window" ? "Window" : "Game"}</label>
+                          {draft.capture.sourceType === "window" && <small>Freezes the last frame while this window is unfocused.</small>}
                         </div>
                         <div className="target-control">
                           <select
                             id="capture-target-window"
                             value={draft.capture.sourceId}
-                            onChange={(event) =>
+                            onChange={(event) => {
+                              const sourceId = event.currentTarget.value;
                               updateDraft((current) => ({
                                 ...current,
-                                capture: { ...current.capture, sourceId: event.target.value },
-                              }))
-                            }
+                                capture: { ...current.capture, sourceId },
+                              }));
+                            }}
                             disabled={settingsBusy || windowSourcesBusy}
                           >
                             {windows.length === 0 ? (
-                              <option value="">No capturable windows detected</option>
+                               <option value="">No windows found — open your {draft.capture.sourceType === "window" ? "application" : "game"}, then refresh</option>
                             ) : (
                               windows.map((win) => (
                                 <option key={win.id} value={win.id}>
@@ -1024,7 +1048,9 @@ export function SettingsModal({
                             {draft.capture.sourceId &&
                               !windows.some((w) => w.id === draft.capture.sourceId) && (
                                 <option value={draft.capture.sourceId}>
-                                  {draft.capture.sourceId} (Previous window)
+                                  {draft.capture.sourceId.startsWith("pid:") || draft.capture.sourceId.startsWith("hwnd:")
+                                    ? `${draft.capture.sourceId} (Stale selection — refresh and reselect the running window)`
+                                    : "Select a running application"}
                                 </option>
                               )}
                           </select>
@@ -1035,9 +1061,25 @@ export function SettingsModal({
                             disabled={settingsBusy || windowSourcesBusy}
                             title="Refresh open application windows"
                           >
-                            {windowSourcesBusy ? "Scanning..." : "Refresh windows"}
+                            {windowSourcesBusy ? "Scanning..." : "Refresh"}
                           </button>
                         </div>
+                      </div>
+                    )}
+
+                    {draft.capture.sourceType !== "display" && (
+                      <div className="capture-help">
+                        {draft.capture.sourceType.startsWith("game") && (
+                          <p id="capture-game-behavior">Waits for a focused game before recording. Freezes on Alt-Tab and resumes when you return.</p>
+                        )}
+                        <p id="capture-visibility-notice">Records the visible screen area, not an isolated view. Overlapping windows and overlays may appear while focused.</p>
+                        <details>
+                          <summary>{draft.capture.sourceType === "game-auto" ? "Supported games and limitations" : "Capture limitations"}</summary>
+                          {draft.capture.sourceType === "game-auto" && (
+                            <p>Automatically detects VALORANT, CS2, Apex, Fortnite, Overwatch, Rocket League, Terraria and Helldivers 2. For other games, select Choose a game.</p>
+                          )}
+                          <p>Capture-excluded applications cannot be recorded. Game resolution changes or GPU failures can reset replay history.</p>
+                        </details>
                       </div>
                     )}
 
@@ -2285,19 +2327,20 @@ export function SettingsModal({
                     <div className="theme-card-grid">
                       <button
                         type="button"
-                        className={`theme-card ${draft.application.theme === "studio" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
+                        className={`theme-card ${selectedBaseTheme === "studio" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
                         onClick={() =>
                           updateDraft((current) => ({
                             ...current,
                             application: {
                               ...current.application,
-                              theme: "studio",
+                               theme: "studio",
+                               colors: {}, iconTheme: null, activeThemePreset: null,
                             },
                           }))
                         }
                         disabled={settingsBusy}
                         role="radio"
-                        aria-checked={draft.application.theme === "studio"}
+                        aria-checked={selectedBaseTheme === "studio"}
                       >
                         <div className="theme-card-header">
                           <div className="theme-title-group">
@@ -2307,24 +2350,25 @@ export function SettingsModal({
                           <span className="theme-tag">Default</span>
                         </div>
                         <ThemePreview theme="studio" />
-                        <p className="theme-description">Graphite surfaces, silver controls, and a soft green replay signal.</p>
+                        <p className="theme-description">Graphite surfaces, silver controls, and matching capture feedback.</p>
                       </button>
 
                       <button
                         type="button"
-                        className={`theme-card ${draft.application.theme === "classic" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
+                        className={`theme-card ${selectedBaseTheme === "classic" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
                         onClick={() =>
                           updateDraft((current) => ({
                             ...current,
                             application: {
                               ...current.application,
-                              theme: "classic",
+                               theme: "classic",
+                               colors: {}, iconTheme: null, activeThemePreset: null,
                             },
                           }))
                         }
                         disabled={settingsBusy}
                         role="radio"
-                        aria-checked={draft.application.theme === "classic"}
+                        aria-checked={selectedBaseTheme === "classic"}
                       >
                         <div className="theme-card-header">
                           <div className="theme-title-group">
@@ -2339,19 +2383,20 @@ export function SettingsModal({
 
                       <button
                         type="button"
-                        className={`theme-card ${draft.application.theme === "ember" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
+                        className={`theme-card ${selectedBaseTheme === "ember" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
                         onClick={() =>
                           updateDraft((current) => ({
                             ...current,
                             application: {
                               ...current.application,
-                              theme: "ember",
+                               theme: "ember",
+                               colors: {}, iconTheme: null, activeThemePreset: null,
                             },
                           }))
                         }
                         disabled={settingsBusy}
                         role="radio"
-                        aria-checked={draft.application.theme === "ember"}
+                        aria-checked={selectedBaseTheme === "ember"}
                       >
                         <div className="theme-card-header">
                           <div className="theme-title-group">
@@ -2366,19 +2411,20 @@ export function SettingsModal({
 
                       <button
                         type="button"
-                        className={`theme-card ${draft.application.theme === "vamp" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
+                        className={`theme-card ${selectedBaseTheme === "vamp" ? "is-selected" : ""} ${settingsBusy ? "is-disabled" : ""}`}
                         onClick={() =>
                           updateDraft((current) => ({
                             ...current,
                             application: {
                               ...current.application,
-                              theme: "vamp",
+                               theme: "vamp",
+                               colors: {}, iconTheme: null, activeThemePreset: null,
                             },
                           }))
                         }
                         disabled={settingsBusy}
                         role="radio"
-                        aria-checked={draft.application.theme === "vamp"}
+                        aria-checked={selectedBaseTheme === "vamp"}
                       >
                         <div className="theme-card-header">
                           <div className="theme-title-group">
@@ -2393,27 +2439,88 @@ export function SettingsModal({
                     </div>
                   </div>
 
-                  <div className="pane-section-header"><h3>Custom colors</h3><p>Override the selected theme. Changes apply when you save.</p></div>
+                  <div className="pane-section-header"><h3>Custom presets</h3><p>Save a color scheme with a name and its own app icon. Preset changes apply only with Save Settings.</p></div>
+                  <div className="settings-group-card">
+                    <label className="field"><span>Saved preset</span>
+                      <select id="theme-preset" disabled={settingsBusy} value={draft.application.activeThemePreset ?? ""}
+                        onChange={(event) => {
+                          const preset = presets.find((item) => item.name === event.currentTarget.value);
+                          if (!preset) return;
+                          setPresetName(preset.name); setPresetMessage("");
+                          updateDraft((current) => ({ ...current, application: { ...current.application,
+                            theme: preset.theme, colors: { ...preset.colors }, iconTheme: preset.iconTheme,
+                            activeThemePreset: preset.name } }));
+                        }}>
+                        <option value="">{presets.length ? "Select a preset" : "No custom presets yet"}</option>
+                        {presets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="field"><span>App icon color</span>
+                      <select id="theme-icon" disabled={settingsBusy} value={draft.application.iconTheme ?? "match"}
+                        onChange={(event) => {
+                          const iconTheme = event.currentTarget.value;
+                          updateDraft((current) => ({ ...current, application: { ...current.application,
+                            iconTheme: iconTheme === "match" ? null : iconTheme as AppSettings["application"]["theme"], activeThemePreset: null } }));
+                        }}>
+                        <option value="match">Match base theme</option><option value="studio">Silver</option>
+                        <option value="classic">Gold</option><option value="ember">Amber</option><option value="vamp">Crimson</option>
+                      </select>
+                    </label>
+                    <label className="field"><span>Preset name</span>
+                      <input id="theme-preset-name" value={presetName} maxLength={40} placeholder="Name your color scheme" disabled={settingsBusy}
+                        onChange={(event) => { setPresetName(event.currentTarget.value); setPresetMessage(""); }} />
+                    </label>
+                    <div className="theme-preset-actions">
+                      <button type="button" className="button button-secondary" disabled={settingsBusy || !presetName.trim() || (!matchingPreset && presets.length >= 20)}
+                        onClick={() => {
+                          const name = presetName.trim();
+                          if (!name || [...name].length > 40 || [...name].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) { setPresetMessage("Use a name of 1–40 characters without control characters."); return; }
+                          const preset = { name: matchingPreset?.name ?? name, theme: draft.application.theme,
+                            colors: { ...themeColors }, iconTheme: draft.application.iconTheme ?? draft.application.theme };
+                          updateDraft((current) => ({ ...current, application: { ...current.application,
+                            themePresets: matchingPreset ? presets.map((item) => item.name === matchingPreset.name ? preset : item) : [...presets, preset],
+                            activeThemePreset: preset.name } }));
+                          setPresetName(preset.name); setPresetMessage("Preset staged. Save Settings to keep it.");
+                        }}>{matchingPreset ? "Update preset" : "Save as preset"}</button>
+                      <button type="button" className="button button-secondary" disabled={settingsBusy || !draft.application.activeThemePreset}
+                        onClick={() => {
+                          const name = draft.application.activeThemePreset;
+                          if (!window.confirm(`Delete preset “${name}”? Your current colors will remain. Save Settings to confirm the change.`)) return;
+                          updateDraft((current) => ({ ...current, application: { ...current.application,
+                            themePresets: presets.filter((preset) => preset.name !== name), activeThemePreset: null } }));
+                          setPresetMessage("Preset deletion staged. Save Settings to keep it.");
+                        }}>Delete preset</button>
+                    </div>
+                    {presetMessage && <p role="status" className="field-help">{presetMessage}</p>}
+                    {presets.length >= 20 && <p className="field-help">20-preset limit reached. Update or delete an existing preset.</p>}
+                  </div>
+
+                  <div className="pane-section-header"><h3>Custom colors</h3><p>Override the base theme. Edit colors first, then save or update a named preset above. Save Settings applies your changes.</p></div>
                   <div className="settings-group-card">
                     <div className="custom-color-grid">
                       {COLOR_FIELDS.map(([key, label]) => (
                         <label className="custom-color-field" key={key}>
                           <span>{label}</span>
                           <input type="color" aria-label={label} disabled={settingsBusy}
-                            value={draft.application.colors?.[key] ?? defaultColors(draft.application.theme)[key] ?? "#000000"}
-                            onChange={(event) => updateDraft((current) => ({...current, application: {...current.application, colors: {...current.application.colors, [key]: event.target.value}}}))} />
+                            value={themeColors[key] ?? "#000000"}
+                            onChange={(event) => {
+                              const value = event.currentTarget.value;
+                              updateDraft((current) => ({...current, application: {...current.application, activeThemePreset: null, colors: {...current.application.colors, [key]: value}}}));
+                            }} />
                           <button type="button" className="button button-small button-secondary" disabled={settingsBusy || !draft.application.colors?.[key]}
-                            onClick={() => updateDraft((current) => ({...current, application: {...current.application, colors: {...current.application.colors, [key]: null}}}))}>Reset</button>
+                            onClick={() => updateDraft((current) => ({...current, application: {...current.application, activeThemePreset: null, colors: {...current.application.colors, [key]: null}}}))}>Reset</button>
                         </label>
                       ))}
                     </div>
-                    <div className="custom-theme-preview" data-theme={draft.application.theme} style={colorVariables(draft.application.colors)}>
-                      <strong>Silk</strong><span className="custom-preview-capture">● Capture ready</span>
+                    <div className="custom-theme-preview" data-theme={draft.application.theme} style={colorVariables(themeColors)}>
+                      <strong>{draft.application.activeThemePreset ?? "Silk"}</strong><span className="custom-preview-capture">Buffering Gameplay</span>
                       <p>Your clips, your colors.</p><small>Replay buffer</small><div className="theme-preview-progress"><span /></div>
                       <span className="theme-preview-action">Save replay</span>
+                      <div className="custom-preview-saved">Clip saved — Replay added to your library</div>
+                      <div className="custom-preview-overlay"><span>✓</span> Clip saved <small>Native overlay preview</small></div>
                     </div>
                     <button type="button" className="button button-small button-secondary" disabled={settingsBusy}
-                      onClick={() => updateDraft((current) => ({...current, application: {...current.application, colors: {}}}))}>Reset all colors</button>
+                      onClick={() => updateDraft((current) => ({...current, application: {...current.application, colors: {}, activeThemePreset: null}}))}>Reset all colors</button>
                   </div>
                 </div>
               )}

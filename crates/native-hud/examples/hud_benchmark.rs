@@ -450,6 +450,7 @@ fn run_benchmark(config: BenchmarkConfig) -> Result<(), String> {
             mode: config.mode,
             anchor: config.anchor,
             exclude_from_capture: config.capture_exclusion,
+            ..Default::default()
         };
         let hud_instance = match config.lifecycle_policy {
             #[cfg(feature = "diagnostic-lifecycle")]

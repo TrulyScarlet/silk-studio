@@ -9,7 +9,9 @@
 use std::time::{Duration, Instant};
 
 use capture_api::{VideoCapture, VideoCaptureConfig};
-use capture_windows::{enumerate_displays, WgcDisplayCapture};
+use capture_windows::{
+    enumerate_displays, DisplayCapture, GuardedWindowCapture, WgcDisplayCapture,
+};
 use media_types::StreamId;
 
 fn arg_value(name: &str) -> Option<String> {
@@ -20,6 +22,59 @@ fn arg_value(name: &str) -> Option<String> {
         .cloned()
 }
 
+enum ProbeCapture {
+    Wgc(WgcDisplayCapture),
+    Display(DisplayCapture),
+    Guarded(GuardedWindowCapture),
+}
+
+impl ProbeCapture {
+    fn stats_snapshot(&self) -> Option<(u64, u64, u64)> {
+        match self {
+            Self::Wgc(wgc) => wgc.stats_snapshot(),
+            _ => None,
+        }
+    }
+}
+
+impl VideoCapture for ProbeCapture {
+    fn enumerate_sources(&self) -> capture_api::Result<Vec<media_types::VideoSourceInfo>> {
+        match self {
+            Self::Wgc(c) => c.enumerate_sources(),
+            Self::Display(c) => c.enumerate_sources(),
+            Self::Guarded(c) => c.enumerate_sources(),
+        }
+    }
+    fn start(&mut self, config: VideoCaptureConfig) -> capture_api::Result<()> {
+        match self {
+            Self::Wgc(c) => c.start(config),
+            Self::Display(c) => c.start(config),
+            Self::Guarded(c) => c.start(config),
+        }
+    }
+    fn next_event(&mut self) -> capture_api::Result<capture_api::VideoCaptureEvent> {
+        match self {
+            Self::Wgc(c) => c.next_event(),
+            Self::Display(c) => c.next_event(),
+            Self::Guarded(c) => c.next_event(),
+        }
+    }
+    fn stop(&mut self) -> capture_api::Result<()> {
+        match self {
+            Self::Wgc(c) => c.stop(),
+            Self::Display(c) => c.stop(),
+            Self::Guarded(c) => c.stop(),
+        }
+    }
+    fn gpu_frame_context(&self) -> Option<encoder_api::GpuFrameContext> {
+        match self {
+            Self::Wgc(c) => c.gpu_frame_context(),
+            Self::Display(c) => c.gpu_frame_context(),
+            Self::Guarded(c) => c.gpu_frame_context(),
+        }
+    }
+}
+
 fn main() {
     let seconds: u64 = arg_value("--seconds")
         .and_then(|v| v.parse().ok())
@@ -28,28 +83,35 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);
 
-    let sources = match enumerate_displays() {
-        Ok(sources) => sources,
-        Err(err) => {
-            eprintln!("enumeration failed: {err}");
-            std::process::exit(1);
-        }
+    let source_id = if let Some(s) = arg_value("--source") {
+        s
+    } else {
+        let sources = match enumerate_displays() {
+            Ok(sources) => sources,
+            Err(err) => {
+                eprintln!("enumeration failed: {err}");
+                std::process::exit(1);
+            }
+        };
+        let source = sources.iter().find(|s| s.is_primary).unwrap_or(&sources[0]);
+        source.id.clone()
     };
-    let source = sources.iter().find(|s| s.is_primary).unwrap_or(&sources[0]);
-    println!(
-        "capturing '{}' ({}) at {} fps for {seconds}s...",
-        source.id,
-        if source.is_primary {
-            "primary"
-        } else {
-            "secondary"
-        },
-        fps
-    );
+    println!("capturing '{}' at {} fps for {seconds}s...", source_id, fps);
 
-    let mut capture = WgcDisplayCapture::new(StreamId(0));
+    let mut capture = if source_id.starts_with("game-guarded:") || source_id.starts_with("guarded:")
+    {
+        ProbeCapture::Guarded(GuardedWindowCapture::new(StreamId(0)))
+    } else if source_id.starts_with("pid:")
+        || source_id.starts_with("hwnd:")
+        || source_id.starts_with("window:")
+        || source_id.starts_with("game:")
+    {
+        ProbeCapture::Display(DisplayCapture::new(StreamId(0)))
+    } else {
+        ProbeCapture::Wgc(WgcDisplayCapture::new(StreamId(0)))
+    };
     if let Err(err) = capture.start(VideoCaptureConfig {
-        source_id: source.id.clone(),
+        source_id,
         target_fps: fps,
     }) {
         eprintln!("start failed: {err}");
@@ -82,6 +144,7 @@ fn main() {
                 format_changes += 1;
                 println!("format changed -> {width}x{height}");
             }
+            Ok(capture_api::VideoCaptureEvent::Idle) => {}
             Ok(capture_api::VideoCaptureEvent::SourceLost) => {
                 println!("SOURCE LOST - stopping probe");
                 lost = true;

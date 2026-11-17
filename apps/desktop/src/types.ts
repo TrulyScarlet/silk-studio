@@ -99,7 +99,8 @@ export type PixelFormat =
   | string;
 
 export type AppTheme = "studio" | "classic" | "ember" | "vamp";
-export type ThemeColors = Partial<Record<"main" | "background" | "text" | "subtext" | "capture" | "replayBuffer", string | null>>;
+export type ThemeColors = Partial<Record<"main" | "background" | "text" | "subtext" | "capture" | "replayBuffer" | "clipSaved" | "clipSavedBackground" | "overlayAccent" | "overlayBackground" | "overlayText", string | null>>;
+export type ThemePreset = { name: string; theme: AppTheme; colors: ThemeColors; iconTheme: AppTheme };
 
 export type EncoderSelection = "auto" | "hardware" | "software";
 
@@ -148,6 +149,9 @@ export type AppSettings = {
     theme: AppTheme;
     openClipsFullscreen?: boolean;
     colors?: ThemeColors;
+    iconTheme?: AppTheme | null;
+    themePresets?: ThemePreset[];
+    activeThemePreset?: string | null;
   };
   diagnostics: {
     loggingLevel: "trace" | "debug" | "info" | "warn" | "error";

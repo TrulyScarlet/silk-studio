@@ -145,6 +145,7 @@ fn hud_mode_defaults_and_config() {
         mode: HudMode::Compact,
         anchor: HudAnchor::TopRight,
         exclude_from_capture: false,
+        ..Default::default()
     };
     assert_eq!(compact_config.mode, HudMode::Compact);
     assert_eq!(compact_config.anchor, HudAnchor::TopRight);
@@ -390,6 +391,7 @@ fn test_native_hud_compact_window_lifecycle_smoke() {
         mode: HudMode::Compact,
         anchor: HudAnchor::TopRight,
         exclude_from_capture: true,
+        ..Default::default()
     };
     let hud = NativeHud::try_new(config)
         .expect("Native HUD compact initialization must succeed on Windows");

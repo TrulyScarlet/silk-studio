@@ -622,7 +622,7 @@ impl D3D11VideoConverter {
         output_height: u32,
         fps: u32,
     ) -> Result<Self, GpuMediaError> {
-        validate_dimensions(input_width, input_height)?;
+        validate_rgb_dimensions(input_width, input_height)?;
         validate_dimensions(output_width, output_height)?;
         if fps == 0 {
             return Err(GpuMediaError::InvalidDimensions {
@@ -907,6 +907,12 @@ fn bt709_rgb_to_nv12_color_spaces() -> (
     (input, output)
 }
 
+fn validate_rgb_dimensions(width: u32, height: u32) -> Result<(), GpuMediaError> {
+    if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+        return Err(GpuMediaError::InvalidDimensions { width, height });
+    }
+    Ok(())
+}
 fn validate_dimensions(width: u32, height: u32) -> Result<(), GpuMediaError> {
     if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(GpuMediaError::InvalidDimensions { width, height });
@@ -917,6 +923,17 @@ fn validate_dimensions(width: u32, height: u32) -> Result<(), GpuMediaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rgb_inputs_may_be_odd_but_nv12_outputs_must_be_even() {
+        for (width, height) in [(336, 235), (335, 236), (335, 235), (1, 1)] {
+            assert!(validate_rgb_dimensions(width, height).is_ok());
+            assert!(validate_dimensions(width, height).is_err());
+        }
+        for dimensions in [(0, 2), (2, 0), (u32::MAX, 2), (2, u32::MAX)] {
+            assert!(validate_rgb_dimensions(dimensions.0, dimensions.1).is_err());
+        }
+        assert!(validate_dimensions(336, 234).is_ok());
+    }
 
     #[test]
     #[ignore = "requires a hardware D3D11 video device"]
@@ -943,66 +960,81 @@ mod tests {
             .unwrap();
         }
         let device = Arc::new(GpuDeviceContext::new(device.unwrap(), context.unwrap()));
-        for binding in [
-            D3D11_BIND_RENDER_TARGET.0,
-            D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0,
-        ] {
-            let pixels = vec![255_u8; 64 * 64 * 4];
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: 64,
-                Height: 64,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: binding as u32,
-                ..Default::default()
-            };
-            let initial = D3D11_SUBRESOURCE_DATA {
-                pSysMem: pixels.as_ptr().cast(),
-                SysMemPitch: 256,
-                SysMemSlicePitch: 16384,
-            };
-            let mut texture = None;
-            unsafe {
-                device
-                    .device
-                    .CreateTexture2D(&desc, Some(&initial), Some(&mut texture))
-                    .unwrap();
-            }
-            let slot = GpuTextureSlot::new(texture.unwrap(), device.clone());
-            let converter = D3D11VideoConverter::new(device.clone(), 64, 64, 64, 64, 60).unwrap();
-            let output = converter.convert(&slot).unwrap();
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            unsafe {
-                output.texture.GetDesc(&mut desc);
-            }
-            desc.Usage = D3D11_USAGE_STAGING;
-            desc.BindFlags = 0;
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-            desc.MiscFlags = 0;
-            let mut staging = None;
-            unsafe {
-                device
-                    .device
-                    .CreateTexture2D(&desc, None, Some(&mut staging))
-                    .unwrap();
-            }
-            let staging = staging.unwrap();
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            unsafe {
-                device.context.CopyResource(&staging, &output.texture);
-                device
-                    .context
-                    .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                    .unwrap();
-                let y = *(mapped.pData as *const u8).add(32 * mapped.RowPitch as usize + 32);
-                device.context.Unmap(&staging, 0);
-                assert!(y >= 230, "white input became Y={y}, binding={binding}");
+        for (input_width, input_height, output_width, output_height) in
+            [(64, 64, 64, 64), (65, 63, 64, 62)]
+        {
+            for binding in [
+                D3D11_BIND_RENDER_TARGET.0,
+                D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0,
+            ] {
+                let pixels = vec![255_u8; (input_width * input_height * 4) as usize];
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: input_width,
+                    Height: input_height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: binding as u32,
+                    ..Default::default()
+                };
+                let initial = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: pixels.as_ptr().cast(),
+                    SysMemPitch: input_width * 4,
+                    SysMemSlicePitch: input_width * input_height * 4,
+                };
+                let mut texture = None;
+                unsafe {
+                    device
+                        .device
+                        .CreateTexture2D(&desc, Some(&initial), Some(&mut texture))
+                        .unwrap();
+                }
+                let slot = GpuTextureSlot::new(texture.unwrap(), device.clone());
+                let converter = D3D11VideoConverter::new(
+                    device.clone(),
+                    input_width,
+                    input_height,
+                    output_width,
+                    output_height,
+                    60,
+                )
+                .unwrap();
+                let output = converter.convert(&slot).unwrap();
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe {
+                    output.texture.GetDesc(&mut desc);
+                }
+                desc.Usage = D3D11_USAGE_STAGING;
+                desc.BindFlags = 0;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                desc.MiscFlags = 0;
+                let mut staging = None;
+                unsafe {
+                    device
+                        .device
+                        .CreateTexture2D(&desc, None, Some(&mut staging))
+                        .unwrap();
+                }
+                let staging = staging.unwrap();
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                unsafe {
+                    device.context.CopyResource(&staging, &output.texture);
+                    device
+                        .context
+                        .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                        .unwrap();
+                    let y = *(mapped.pData as *const u8).add(
+                        output_height as usize / 2 * mapped.RowPitch as usize
+                            + output_width as usize / 2,
+                    );
+                    device.context.Unmap(&staging, 0);
+                    assert!(y >= 230, "white input became Y={y}, binding={binding}");
+                }
             }
         }
     }

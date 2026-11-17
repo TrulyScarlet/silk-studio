@@ -15,7 +15,45 @@ struct RecoveringCapture {
     losses: u32,
 }
 
+// Optional acceptance fault injection; never changes a real device's settings.
+struct RecoveringAudio {
+    capture: WasapiAudioCapture,
+    started: Instant,
+    losses: u32,
+}
+impl audio_api::AudioCapture for RecoveringAudio {
+    fn enumerate_devices(&self) -> audio_api::Result<Vec<media_types::AudioDeviceInfo>> {
+        self.capture.enumerate_devices()
+    }
+    fn start(&mut self, config: audio_api::AudioCaptureConfig) -> audio_api::Result<()> {
+        self.capture.start(config)
+    }
+    fn stop(&mut self) -> audio_api::Result<()> {
+        self.capture.stop()
+    }
+    fn capture_instant(&self, frame: &media_types::AudioFrame) -> Option<Instant> {
+        self.capture.capture_instant(frame)
+    }
+    fn next_event(&mut self) -> audio_api::Result<audio_api::AudioCaptureEvent> {
+        if self.losses < 2
+            && self.started.elapsed() >= Duration::from_secs(3 * u64::from(self.losses + 1))
+        {
+            self.losses += 1;
+            self.capture.stop()?;
+            std::thread::sleep(Duration::from_millis(500));
+            return Ok(audio_api::AudioCaptureEvent::DeviceLost);
+        }
+        self.capture.next_event()
+    }
+}
+
 impl VideoCapture for RecoveringCapture {
+    fn timestamp_origin(&self) -> Option<Instant> {
+        self.capture.timestamp_origin()
+    }
+    fn active_source_id(&self) -> Option<String> {
+        self.capture.active_source_id()
+    }
     fn enumerate_sources(&self) -> capture_api::Result<Vec<VideoSourceInfo>> {
         self.capture.enumerate_sources()
     }
@@ -61,7 +99,15 @@ fn native_display_restarts_preserve_all_configured_audio_tracks() {
             let mut input = AudioInput::new(
                 StreamId(i as u32 + 1),
                 t["name"].as_str().unwrap(),
-                Box::new(capture),
+                if std::env::var_os("SILK_AV_AUDIO_RECOVERY").is_some() {
+                    Box::new(RecoveringAudio {
+                        capture,
+                        started: Instant::now(),
+                        losses: 0,
+                    }) as Box<dyn audio_api::AudioCapture>
+                } else {
+                    Box::new(capture)
+                },
                 encoder_media_foundation::new_aac_encoder(),
             );
             input.capture_config.device_id = t["deviceId"].as_str().map(str::to_owned);
@@ -95,7 +141,7 @@ fn native_display_restarts_preserve_all_configured_audio_tracks() {
     engine.start().unwrap();
     let started = Instant::now();
     let mut recovered = 0;
-    while started.elapsed() < Duration::from_secs(12) {
+    while started.elapsed() < Duration::from_secs(16) {
         for event in engine.pump() {
             match event {
                 EngineEvent::WorkerFailed { code, message } => panic!("{code}: {message}"),

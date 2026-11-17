@@ -267,6 +267,27 @@ fn shell_state_exposes_recorder_status_snapshot() {
 }
 
 #[test]
+fn recorder_status_in_auto_game_mode_never_reports_desktop_target() {
+    let dir = TempDir::new("shell-status-auto-game").expect("temp");
+    let mut config = AppConfig::default();
+    config.capture.source_type = "game-auto".to_string();
+    config.capture.source_id = "primary".to_string();
+
+    let state = shell::ShellState::with_app_config(
+        shell::build_controller(dir.path().to_path_buf()),
+        None,
+        config,
+        dir.path().join("config.json"),
+        true,
+    );
+
+    let status = shell::recorder_status(&state).expect("status");
+    if let Some(target) = status.capture_target {
+        assert!(!target.to_lowercase().contains("desktop"));
+    }
+}
+
+#[test]
 fn invalid_full_settings_are_rejected_before_runtime_changes() {
     let dir = TempDir::new("shell-invalid-settings").expect("temp");
     let state = shell::ShellState::with_app_config(
@@ -610,6 +631,24 @@ fn controller_settings_maps_video_bitrate_none() {
     let controller_settings = shell::controller_settings_from_config(&config);
     assert_eq!(controller_settings.video_encoder_config.bitrate_kbps, None);
     assert_eq!(controller_settings.video_encoder_config.preset_level, 2);
+}
+
+#[test]
+fn controller_settings_preserves_capture_mode_at_the_backend_boundary() {
+    let mut config = AppConfig::default();
+    config.capture.source_id = "pid:42:hwnd:120".into();
+    for mode in ["game", "window", "display"] {
+        config.capture.source_type = mode.into();
+        let expected = if mode == "display" {
+            "pid:42:hwnd:120".into()
+        } else {
+            format!("{mode}:pid:42:hwnd:120")
+        };
+        assert_eq!(
+            shell::controller_settings_from_config(&config).source_name,
+            expected
+        );
+    }
 }
 
 #[test]

@@ -43,7 +43,7 @@ pub struct CaptureSettings {
 impl Default for CaptureSettings {
     fn default() -> Self {
         Self {
-            source_type: "game".to_string(),
+            source_type: "game-auto".to_string(),
             source_id: "auto".to_string(),
             frame_rate: 60,
             output_resolution: OutputResolution::Native,
@@ -336,6 +336,20 @@ pub struct ThemeColors {
     pub subtext: Option<String>,
     pub capture: Option<String>,
     pub replay_buffer: Option<String>,
+    pub clip_saved: Option<String>,
+    pub clip_saved_background: Option<String>,
+    pub overlay_accent: Option<String>,
+    pub overlay_background: Option<String>,
+    pub overlay_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ThemePreset {
+    pub name: String,
+    pub theme: Theme,
+    pub colors: ThemeColors,
+    pub icon_theme: Theme,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +370,12 @@ pub struct ApplicationSettings {
     pub open_clips_fullscreen: bool,
     #[serde(default)]
     pub colors: ThemeColors,
+    #[serde(default)]
+    pub icon_theme: Option<Theme>,
+    #[serde(default)]
+    pub theme_presets: Vec<ThemePreset>,
+    #[serde(default)]
+    pub active_theme_preset: Option<String>,
 }
 
 fn default_clip_sound_volume() -> u16 {
@@ -382,6 +402,9 @@ impl Default for ApplicationSettings {
             theme: Theme::Studio,
             open_clips_fullscreen: false,
             colors: ThemeColors::default(),
+            icon_theme: None,
+            theme_presets: Vec::new(),
+            active_theme_preset: None,
         }
     }
 }

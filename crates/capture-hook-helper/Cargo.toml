@@ -1,0 +1,23 @@
+[package]
+name = "capture-hook-helper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "silk_capture_hook_helper"
+crate-type = ["cdylib"]
+
+[features]
+d3d12-observed-loss-helper = ["d3d12-helper", "capture-hook-prototype/d3d12-observed-loss-fixture"]
+d3d12-auto-helper = ["d3d12-late-helper", "capture-hook-prototype/d3d12-auto-resize-fixture"]
+d3d12-late-helper = ["d3d12-helper", "capture-hook-prototype/d3d12-late-resize-fixture"]
+d3d12-helper = ["experimental-helper", "capture-hook-prototype/d3d12-remote-helper-fixture"]
+default = []
+experimental-helper = ["dep:capture-hook-prototype", "dep:windows", "dep:gpu-windows"]
+resident-helper = ["experimental-helper", "capture-hook-prototype/resident-hooks"]
+
+[target.'cfg(windows)'.dependencies]
+capture-hook-prototype = { path = "../capture-hook-prototype", optional = true, features = ["experimental-hooks"] }
+gpu-windows = { workspace = true, optional = true }
+windows = { version = "0.62", optional = true, features = ["Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_System_Threading"] }

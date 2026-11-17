@@ -103,8 +103,8 @@ The MVP will not provide:
 - Advanced video editing
 - Cloud accounts
 - Mandatory telemetry
-- Injected graphics hooks
-- Anti-cheat-sensitive process injection
+- General-purpose process injection and anti-cheat bypass (opt-in experimental
+  game-capture hooks are scoped separately in ADR 0044)
 - Full OBS feature parity
 - Mobile clients
 - Webcam overlays
@@ -1281,7 +1281,9 @@ prototype.
 - Third-party update mechanisms must use signed packages.
 - The application and installer must be code-signed for production.
 - All dependency binaries must come from controlled, reproducible sources.
-- Process injection is prohibited in the MVP.
+- Process injection is prohibited except for the opt-in experimental game-capture
+  milestone defined in ADR 0044. Anti-cheat bypass and protected-process injection
+  remain prohibited.
 - The UI must validate all paths and file names crossing the IPC boundary.
 - Native commands exposed to the UI must use an allowlist.
 
@@ -1695,7 +1697,8 @@ Do not:
 - Copy OBS assets, UI, branding, comments, or documentation.
 - Use code from OBS issues, patches, or pull requests.
 - Introduce GPL or similarly restrictive dependencies without approval.
-- Implement process injection or graphics hooks during the MVP.
+- Implement process injection or graphics hooks outside ADR 0044's opt-in
+  experimental game-capture scope; never implement anti-cheat bypass.
 - Place real-time media processing in the UI.
 - Claim hardware behavior is verified unless it was actually tested.
 

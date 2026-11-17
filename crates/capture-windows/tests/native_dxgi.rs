@@ -31,6 +31,7 @@ fn auto_reports_actual_dimensions_before_delivering_video() {
                 received = true;
                 break;
             }
+            VideoCaptureEvent::Idle => {}
             VideoCaptureEvent::SourceLost => panic!("foreground display changed during test"),
             _ => {}
         }
